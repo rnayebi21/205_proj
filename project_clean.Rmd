@@ -10,58 +10,58 @@ suppressPackageStartupMessages({
 library(dplyr)
 install.packages("Seurat")
 library(Seurat)
-install.packages("DESeq2")
 })
 ```
 
-```{r}
+#```{r}
 setwd("~/Users/adriana/Documents/Stanford_Classes/First Year/winter 2026/stemrem 205/stemrem")
 ```
 
 ### rahcel & perla cleaned up this code so that it started with what i want 
 
-```{r}
+#```{r}
 metadata.DVC <- read.table("metadata_all_DVC.txt", sep = "\t", header = TRUE)
 metadata.DVC <- metadata.DVC[-1,]
 head(metadata.DVC)
 ```
 
 ##make and save to compute (saved to mac do not redo this)
-```{r}
+#```{r}
 write.csv(metadata.DVC, file = "metadata.DVC.csv", row.names = FALSE)
 ```
 
 
 ##after perla gave me terminal code for brew (do not redo this)
-```{r}
+
+#```{r}
 install.packages("SeuratDisk")
 library(SeuratDisk)
 ```
-```{r}
+#```{r}
 R.version.string
 packageVersion("Seurat")
 install.packages("remotes")
 remotes::install_github("mojaveazure/seurat-disk")
 ```
-```{r}
+#```{r}
 library(SeuratDisk)
 install.packages("hdf5r")
 ```
 
 ###using perla code to convert h5ad (do not redo this)
 
-```{r}
+#```{r}
 Convert("SG_publication_allmice_DVC.h5ad", dest = "h5seurat", overwrite = TRUE) # will create this: your_file.h5seurat 
 h5ad.as.seuratobj <- LoadH5Seurat("SG_publication_allmice_DVC.h5seurat") # will load as a seurat object and you can check it to verify, make sure you use head()
 head(h5ad.as.seuratobj)
 ```
-```{r}
+#```{r}
 library(SeuratDisk)
 SeuratDisk:::Inspect("SG_publication_allmice_DVC.h5ad")
 ```
 
 ##this chunk seemed to work, i see a large seurat in data (rds file is saved to mac, so we are done here)
-```{r}
+#```{r}
 library(zellkonverter)
 library(Seurat)
 
@@ -70,9 +70,9 @@ sce <- readH5AD("SG_publication_allmice_DVC.h5ad")
 allmice.h5ad.as.seurat_obj <- as.Seurat(sce, counts = "X", data = NULL)
 #this step saves the seurat object as rds to my latpop 
 saveRDS(allmice.h5ad.as.seurat_obj, "/Users/adriana/Documents/Stanford Classes/First Year/winter 2026/stemrem 205/stemrem1/stemrem/allmice.rds")
-```
+#```
 
-#### START HERE FOR PROJECT
+##START HERE FOR PROJECT
 
 ##rachel helped looking for low quality: mt 
 ## the chunk below works to reload after deleted allmice.data from environemnt 
@@ -117,7 +117,7 @@ head(gene_expression)
 ```
 
 ##i made an rds file with all the mouse stuff and sorted for glp1r and gfral. but i did not sort mitochondria or features so may need to redo!!! (its we checked mitchondria and it seems like the authors already sorted that )
-##this output is GLP1 and GRFAL positive CELLS (not neurons, so cells with both things)
+##this output is GLP1 and GRFAL positive CELLS (not neurons, so any cells with at least one glp1r or gfral)
 #defining threshold as greater than 0
 ```{r}
 threshold <- 0
@@ -239,17 +239,17 @@ ElbowPlot(filtered_Glp1r_Gfral)
 ##starting with 10 
 ```{r}
 filtered_Glp1r <- FindNeighbors(filtered_Glp1r, dims = 1:5)
-filtered_Glp1r <- FindClusters(filtered_Glp1r, resolution = 0.2)
+filtered_Glp1r <- FindClusters(filtered_Glp1r, resolution = 0.15)
 filtered_Gfral <- FindNeighbors(filtered_Gfral, dims = 1:4)
-filtered_Gfral <- FindClusters(filtered_Gfral, resolution = 0.2)
+filtered_Gfral <- FindClusters(filtered_Gfral, resolution = 0.15)
 filtered_Glp1r_Gfral <- FindNeighbors(filtered_Glp1r_Gfral, dims = 1:6)
-filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral, resolution = 0.2)
+filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral, resolution = 0.15)
 ```
 
-#UMAP
+#UMAP of Glp1r alone, Gfral alone, and combined subset
 ```{r}
-filtered_Glp1r <- RunUMAP(filtered_Glp1r, dims = 1:5)
-filtered_Gfral <- RunUMAP(filtered_Gfral, dims = 1:4)
+filtered_Glp1r <- RunUMAP(filtered_Glp1r, dims = 1:6)
+filtered_Gfral <- RunUMAP(filtered_Gfral, dims = 1:6)
 filtered_Glp1r_Gfral <- RunUMAP(filtered_Glp1r_Gfral, dims = 1:6)
 ```
 
@@ -260,13 +260,402 @@ DimPlot(filtered_Gfral, reduction = "umap")
 DimPlot(filtered_Glp1r_Gfral, reduction = "umap")
 ```
 
+
+## trying to annotate clusters
+```{r}
+cluster_membership <- filtered_Glp1r_Gfral$seurat_clusters
+table(cluster_membership)
+```
+
+### we use findallmarkers and find DIFFERENCES between clusters
+##FindAllMarkersidentifies markers for all clusters in a Seurat object relative to all other clusters, differential expression analysis across all clusters 
+##output is a data frame that includes a row for each gene, annotated by the cluster where it is significantly expressed
+```{r}
+cluster_markers <- FindAllMarkers(filtered_Glp1r_Gfral)
+# View top markers for each cluster
+head(cluster_markers)
+```
+
+
+##significant cluster markers
+```{r}
+significant_markers <- cluster_markers %>%
+  filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1) 
+head(significant_markers)
+dim(significant_markers)
+```
+```{r}
+library(dplyr)
+
+# Assuming your data is named 'markers' and has 'gene' and 'cluster' columns
+genes_by_cluster <- significant_markers %>%
+  group_by(cluster) %>%
+  summarize(genes = list(gene))  # Create a list of genes for each cluster
+
+# View the result
+print(genes_by_cluster)
+```
+
+### look at top different genes by cluster
+```{r}
+
+#cluster0
+sorted_cluster0_genes <- significant_markers %>%
+  filter(cluster == "0") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+
+# View the genes for cluster0
+print(sorted_cluster0_genes)
+
+#cluster 1
+sorted_cluster1_genes <- significant_markers %>%
+  filter(cluster == "1") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster1_genes)
+
+#cluster 2
+sorted_cluster2_genes <- significant_markers %>%
+  filter(cluster == "2") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+
+print(sorted_cluster2_genes)
+
+#cluster3
+sorted_cluster3_genes <- significant_markers %>%
+  filter(cluster == "3") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster3_genes)
+
+#cluster4
+sorted_cluster4_genes <- significant_markers %>%
+  filter(cluster == "4") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster4_genes)
+
+#cluster5
+sorted_cluster5_genes <- significant_markers %>%
+  filter(cluster == "5") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster5_genes)
+
+```
+
+###I want to look at top genes for every cluster, trying to identify identity overlap !!!
+##trying to figure out top genes for each cluster, not just the different ones
+##after running the code again now it only has 8 clusters 0-7. finding clusters again probably caused the issue! (need to use elbow plot to guide, if these clusters all look the same w top cells, try lower elbow plot #)
+# 0.15 res has 6 clusters seeing if this helps
+#0.17 had 7 clusters
+
+```{r}
+library(Seurat)
+library(dplyr)
+
+# Ensure clustering has been performed on your data
+#filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral)
+
+# Get the average expression per cluster
+average_expression <- AverageExpression(filtered_Glp1r_Gfral, return.seurat = FALSE)
+
+# Convert the average expression to a data frame
+avg_expr_df <- as.data.frame(average_expression$originalexp)
+
+# Create an empty list to hold top genes for each cluster
+top_genes_list <- list()
+
+# Specify the number of top genes to retrieve
+top_n <- 10
+
+# Loop through each column (cluster) to find top genes
+for (cluster in colnames(avg_expr_df)) {
+  # Get the top N genes for the cluster
+  top_genes <- avg_expr_df %>%
+    arrange(desc(!!sym(cluster))) %>%  # Sort the genes by their average expression
+    head(top_n) %>%                    # Select the top N genes
+    rownames()                         # Extract gene names
+  top_genes_list[[cluster]] <- top_genes  # Store results in the list
+}
+
+# Combine the results into a data frame for easier viewing
+top_genes_df <- do.call(rbind, lapply(names(top_genes_list), function(cluster_name) {
+  data.frame(Cluster = cluster_name, Gene = top_genes_list[[cluster_name]], stringsAsFactors = FALSE)
+}))
+
+# View the results
+print(top_genes_df)
+```
+
+## separating each column is one cluster !!!
+## this gives us gene is row and expr for each cluster
+```{r}
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(tibble)  # For rownames_to_column()
+
+# Ensure clustering has been performed on your data
+#filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral) ## DO NOT REPEAT THIS KEEP MY DIMS
+
+# Get the average expression per cluster
+average_expression <- AverageExpression(filtered_Glp1r_Gfral, return.seurat = FALSE)
+
+# Convert the average expression to a data frame
+avg_expr_df <- as.data.frame(average_expression$originalexp)
+
+# Check the dim and structure of the average expression data frame
+print(dim(avg_expr_df))  # Expect genes x clusters
+print(head(avg_expr_df))  # Preview the first few rows
+
+# Create an empty list to hold top genes for each cluster
+top_genes_list <- list()
+
+# Specify the number of top genes to retrieve
+top_n <- 10
+
+# Loop through each column (cluster) to find top genes along with their expression levels
+for (cluster in colnames(avg_expr_df)) {
+  # Get the top N genes for the cluster
+  top_genes <- avg_expr_df %>%
+    arrange(desc(!!sym(cluster))) %>%     # Sort the genes by their average expression
+    head(top_n) %>%                       # Select the top N genes
+    rownames_to_column(var = "Gene") %>%  # Convert row names to a column called "Gene"
+    mutate(Cluster = cluster,              # Add a column for the cluster
+           Expression = !!sym(cluster))    # Capture the corresponding expression value
+  
+  # Store results in the list
+  top_genes_list[[cluster]] <- top_genes  
+}
+
+# Combine the results into a single data frame
+top_genes_df <- bind_rows(top_genes_list)
+
+# Pivot the data frame to have genes as rows and clusters as columns
+top_genes_wide <- top_genes_df %>%
+  select(Gene, Cluster, Expression) %>%  # Ensure the relevant columns are selected
+  pivot_wider(names_from = Cluster, values_from = Expression, values_fill = 0)  # Convert to wide format
+
+# View the reshaped data frame
+print(top_genes_wide)
+```
+
+##this orders by a specified cluster 
+```{r}
+#ordered by 0
+ordered_genes_cluster0 <- top_genes_wide %>%
+  arrange(desc(g0))  
+print(ordered_genes_cluster0)
+
+#ordered by cluster 1
+ordered_genes_cluster1 <- top_genes_wide %>%
+  arrange(desc(g1))  
+print(ordered_genes_cluster1)
+
+#ordered by cluster 2
+ordered_genes_cluster2 <- top_genes_wide %>%
+  arrange(desc(g2))  
+print(ordered_genes_cluster2)
+
+#ordered by cluster 3
+ordered_genes_cluster3 <- top_genes_wide %>%
+  arrange(desc(g3))  
+print(ordered_genes_cluster3)
+
+#ordered by cluster 4
+ordered_genes_cluster4 <- top_genes_wide %>%
+  arrange(desc(g4))  
+print(ordered_genes_cluster4)
+
+#ordered by cluster 5
+ordered_genes_cluster5 <- top_genes_wide %>%
+  arrange(desc(g5))  
+print(ordered_genes_cluster5)
+
+```
+
+
+##trying to see which "identity_layer1" most common in cluster
+
+```{r}
+data <- filtered_Glp1r_Gfral@meta.data %>%
+  select(seurat_clusters, identity_layer1)  
+
+# Find the most frequent identity per cluster
+result <- data %>%
+  group_by(seurat_clusters) %>%
+  summarise(most_frequent_identity1 = names(which.max(table(identity_layer1))))
+
+# View the result
+print(result)
+```
+
+
+##trying identity_layer2 - NO REPEATS WITH 0.15 res, so we like 0.15 res better than 0.2 , 6 total clusters and label by identity layer 2, but astrocytes get messed up. trying other res . 0.17 has repeats so stick with 0.15!
+```{r}
+data2 <- filtered_Glp1r_Gfral@meta.data %>%
+  select(seurat_clusters, identity_layer2)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+result2 <- data2 %>%
+  group_by(seurat_clusters) %>%
+  summarise(most_frequent_identity2 = names(which.max(table(identity_layer2))))
+
+# View the result
+print(result2)
+
+#how much of each cluster is id2
+result2 <- data2 %>%
+  group_by(seurat_clusters, identity_layer2) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer2, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(result2)
+```
+
+
+##trying identity_layer3
+```{r}
+data3 <- filtered_Glp1r_Gfral@meta.data %>%
+  select(seurat_clusters, identity_layer3)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+result3 <- data3 %>%
+  group_by(seurat_clusters) %>%
+  summarise(most_frequent_identity3 = names(which.max(table(identity_layer3))))
+
+##how much of each cluster has this identity3
+result3 <- data3 %>%
+  group_by(seurat_clusters, identity_layer3) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer3, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(result3)
+```
+
+## i like it better with 0.15 res ! keeping this
+##rename clusters by identity_layer3
+
+```{r}
+# 0 = mixed_neurons (because it has a lot of 1. 2 and 3) (layer 3 but more specific than layer 2 i think)
+# 1 = Sall3_class (layer 2, more accurate, 70%)
+# 2 = M0 (M0 good, 98%)
+# 3 = Vglut1 (good, 85%)
+# 4 = astrocyte (this is mixed but lets keep it?? figure out bio relevance- golli neurons express glia genes!!!)
+# 5 = oligodendrocyte (98%)
+# 6 = 
+
+new.cluster.ids <- c("mixed_neurons", 'Sall3_class', "M0", 
+                     'Vglut1', 'astrocyte',
+                     'oligodendrocyte'
+                     )
+names(new.cluster.ids) <- levels(filtered_Glp1r_Gfral)
+filtered_Glp1r_Gfral <- RenameIdents(filtered_Glp1r_Gfral, new.cluster.ids)
+```
+
+```{r}
+# plot umap with renamed clusters
+DimPlot(filtered_Glp1r_Gfral, reduction = "umap", label = TRUE, pt.size = 0.3)
+```
+
+### Looking for cluster identities for filtered_glp1r
+##trying to see which "identity_layer1" most common in cluster
+
+```{r}
+glp1r_data <- filtered_Glp1r@meta.data %>%
+  select(seurat_clusters, identity_layer1)  
+
+# Find the most frequent identity per cluster
+glp1r_result <- glp1r_data %>%
+  group_by(seurat_clusters) %>%
+  summarise(glp1r_most_frequent_identity1 = names(which.max(table(identity_layer1))))
+
+# View the result
+print(glp1r_result)
+```
+
+
+##trying identity_layer2 - NO REPEATS WITH 0.15 res, so we like 0.15 res better than 0.2 , 6 total clusters and label by identity layer 2, but astrocytes get messed up. trying other res . 0.17 has repeats so stick with 0.15!
+```{r}
+glp1r_data2 <- filtered_Glp1r@meta.data %>%
+  select(seurat_clusters, identity_layer2)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+glp1r_result2 <- glp1r_data2 %>%
+  group_by(seurat_clusters) %>%
+  summarise(glp1r_most_frequent_identity2 = names(which.max(table(identity_layer2))))
+
+# View the result
+print(glp1r_result2)
+
+#how much of each cluster is id2
+glp1r_result2 <- data2 %>%
+  group_by(seurat_clusters, identity_layer2) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer2, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(glp1r_result2)
+```
+
+
+##trying identity_layer3
+```{r}
+glp1r_data3 <- filtered_Glp1r@meta.data %>%
+  select(seurat_clusters, identity_layer3)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+glp1r_result3 <- glp1r_data3 %>%
+  group_by(seurat_clusters) %>%
+  summarise(glp1r_most_frequent_identity3 = names(which.max(table(identity_layer3))))
+print(glp1r_result3)
+
+##how much of each cluster has this identity3
+glp1r_result3 <- glp1r_data3 %>%
+  group_by(seurat_clusters, identity_layer3) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer3, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(glp1r_result3)
+```
+
 ##looking at interesting genes on all of the umaps
 ```{r}
-genes_to_plot = c('Phox2b', 'Glp1r', 'Gfral', 'Cck', 'Th', 'Vglut', 'Lmx1b', 'Gcg', 'Calcr', 'Gad2', 'Casr', 'Glp1', 'Gdf15' )
+genes_to_plot = c( 'Glp1r', 'Gfral',  'Vglut' )
 FeaturePlot(filtered_Glp1r, reduction = "umap", features = genes_to_plot)
 FeaturePlot(filtered_Gfral, reduction = "umap", features = genes_to_plot)
 FeaturePlot(filtered_Glp1r_Gfral, reduction = "umap", features = genes_to_plot)
 ```
+
+##NOW MOVING ON TO DEGS
 
 ## compare DEGs between glp1r and gfral cells using the combined dataset 
 
@@ -276,7 +665,8 @@ glp1r_cells <- WhichCells(filtered_Glp1r_Gfral, expression = Glp1r > 0)  # Adjus
 gfral_cells <- WhichCells(filtered_Glp1r_Gfral, expression = Gfral > 0) 
 ```
 
-#this makes a column called cell_type and labels cells as both, glp1r, or gfral 
+#this makes a column called cell_type and labels cells as both, glp1r, or gfral so we can compare only glp1r and gfral
+##FindMarkers compares our two groups and the output is DEGs between the two groups
 ```{r}
 filtered_Glp1r_Gfral <- AddMetaData(filtered_Glp1r_Gfral, 
                                      metadata = ifelse(Cells(filtered_Glp1r_Gfral) %in% glp1r_cells & 
@@ -287,7 +677,7 @@ filtered_Glp1r_Gfral <- AddMetaData(filtered_Glp1r_Gfral,
                                                               "Gfral")), 
                                      col.name = "cell_type")
 
-# Identify differentially expressed genes between the two cell types of interest 
+# Identify differentially expressed genes between the two cell types of interest, this selected the cells we want and not BOTH
 deg_results <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Glp1r", ident.2 = "Gfral", group.by = "cell_type")
 
 # View the results
@@ -320,7 +710,8 @@ deg_results <- na.omit(deg_results)
 
 ##volcano with enhanced volcano
 ```{r}
-BiocManager::install("EnhancedVolcano")
+BiocManager::install("EnhancedVolcano", force = TRUE)
+library(EnhancedVolcano)
 ```
 
 ##this is showing us DEGs, first plot shows glp1r and gfral then we narrow it down to see the other genes 
@@ -341,8 +732,8 @@ EnhancedVolcano(deg_results,
     ylim = c(0, 10), )
 ```
 
-### Now we are subsetting to ONLY neurons. repeat the above DEG analysis from the whole cell population with only neurons 
-
+### Now we are subsetting to ONLY neurons. repeat the above DEG analysis from the whole cell population with only neurons with our receptors. this is neruons only 
+#this subsets to only neurons 
 ```{r}
 neurons <- subset(filtered_Glp1r_Gfral, subset = identity_layer1 == "neuron")
 head(neurons)
@@ -395,7 +786,7 @@ EnhancedVolcano(neuron_deg_results,
 ```
 
 
-### now looking between adlib vs fasted (can do this with any feeding condition)
+### now looking between adlib vs fasted (can do this with any feeding condition) from our all cells. we may want to do this with neurons and glia separately 
 
 ###DEGS for ad libitum vs fast in our subset !!! 
 ## i think this pattern can be used for like neurons and stuff too. NEED to read paper to see what is already done! but i think this way of subsetting is unique 
@@ -405,7 +796,7 @@ print(distinct_values)
 ```
 
 
-#creating a new column with the name diet_category like we did with cell_type 
+#creating a new column with the name diet_category like we did with cell_type (THIS IS NOT SPECIFIC TO NEURONS!)
 ```{r}
 filtered_Glp1r_Gfral <- AddMetaData(
   object = filtered_Glp1r_Gfral,
@@ -469,6 +860,97 @@ EnhancedVolcano(diet_deg_results,
     ylim = c(0, 10), )
 ```
 
+### diet refed vs fast in all glp1r&gfral
+
+```{r}
+# Identify differentially expressed genes between the diet types
+diet_deg_results2 <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Refed", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(diet_deg_results2)
+```
+
+```{r}
+diet_deg_results_sorted2 <- diet_deg_results2[order(diet_deg_results2$avg_log2FC), ]
+head(diet_deg_results_sorted2)
+significant_genes_diet2 <- diet_deg_results2[diet_deg_results2$p_val_adj < 0.05 & abs(diet_deg_results2$avg_log2FC) > 1, ]
+head(significant_genes_diet2)
+dim(diet_deg_results_sorted2)
+dim(significant_genes_diet2)
+print(significant_genes_diet2)
+```
+```{r}
+diet_deg_results2$log2FoldChange <- diet_deg_results2$avg_log2FC
+diet_deg_results2$negLog10PValue <- -log10(diet_deg_results2$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+diet_deg_results2 <- na.omit(diet_deg_results2)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(diet_deg_results2,
+    lab = rownames(diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(diet_deg_results2,
+    lab = rownames(diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+## all glp1r and gfral DIET adlib vs refed (bc refed vs fast doesnt seem to have much difference)
+
+```{r}
+# Identify differentially expressed genes between the diet types
+diet_deg_results3 <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Ad libitum", ident.2 = "Refed", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(diet_deg_results3)
+```
+
+```{r}
+diet_deg_results_sorted3 <- diet_deg_results3[order(diet_deg_results3$avg_log2FC), ]
+head(diet_deg_results_sorted3)
+significant_genes_diet3 <- diet_deg_results3[diet_deg_results2$p_val_adj < 0.05 & abs(diet_deg_results3$avg_log2FC) > 1, ]
+head(significant_genes_diet3)
+dim(diet_deg_results_sorted3)
+dim(significant_genes_diet3)
+print(significant_genes_diet3)
+```
+```{r}
+diet_deg_results3$log2FoldChange <- diet_deg_results3$avg_log2FC
+diet_deg_results3$negLog10PValue <- -log10(diet_deg_results3$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+diet_deg_results3 <- na.omit(diet_deg_results3)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(diet_deg_results3,
+    lab = rownames(diet_deg_results3),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(diet_deg_results3,
+    lab = rownames(diet_deg_results3),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+
 ##trying to label glp1r and gfral in volcano plot for fed vs fasted, they are there but not significant 
 
 ```{r}
@@ -490,7 +972,6 @@ print(present_genes_info)
 ```
 
 ##now looking at DEGs bw neurons and glia in my population
-
 ##neurons vs glia identity1 first using both combined 
 ```{r}
 # Perform differential expression analysis comparing neurons and glia
@@ -525,7 +1006,285 @@ EnhancedVolcano(deg_neuron_vs_glia,
 ```
 
 
+##adlib vs fasted in NEURONS only 
 
+```{r}
+# Identify differentially expressed genes between the diet types in NEURONS
+
+neurons <- AddMetaData(
+  object = neurons,
+  metadata = case_when(
+    neurons$orig.ident == "adlib" ~ "Ad libitum",
+    neurons$orig.ident == "fast" ~ "Fasted",
+    neurons$orig.ident == "refed" ~ "Refed",  
+    TRUE ~ "Other"  # Fallback for any other conditions not specifically captured
+  ),
+  col.name = "diet_category"
+)
+
+head(neurons)
+# Create a frequency table for the 'diet' column
+neurons_diet_counts <- table(neurons$diet_category)
+
+# Print the counts
+print(neurons_diet_counts)
+```
+
+## neurons adlib vs fast 
+```{r}
+neurons_diet_deg_results <- FindMarkers(neurons, ident.1 = "Ad libitum", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(neurons_diet_deg_results)
+```
+
+```{r}
+neurons_diet_deg_results_sorted <- neurons_diet_deg_results[order(neurons_diet_deg_results$avg_log2FC), ]
+head(neurons_diet_deg_results_sorted)
+significant_genes_neurons_diet <- neurons_diet_deg_results[neurons_diet_deg_results$p_val_adj < 0.05 & abs(neurons_diet_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_neurons_diet)
+dim(neurons_diet_deg_results_sorted)
+dim(significant_genes_neurons_diet)
+print(significant_genes_neurons_diet)
+```
+```{r}
+neurons_diet_deg_results$log2FoldChange <- neurons_diet_deg_results$avg_log2FC
+neurons_diet_deg_results$negLog10PValue <- -log10(neurons_diet_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+neurons_diet_deg_results <- na.omit(neurons_diet_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(neurons_diet_deg_results,
+    lab = rownames(neurons_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(neurons_diet_deg_results,
+    lab = rownames(neurons_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+### REPEATING WITH FED VS FAST !!!
+## neurons refed vs fast this is going to be referred to as diet "2"
+```{r}
+neurons_diet_deg_results2 <- FindMarkers(neurons, ident.1 = "Refed", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(neurons_diet_deg_results2)
+```
+
+```{r}
+neurons_diet_deg_results_sorted2 <- neurons_diet_deg_results2[order(neurons_diet_deg_results2$avg_log2FC), ]
+head(neurons_diet_deg_results_sorted2)
+significant_genes_neurons_diet2 <- neurons_diet_deg_results2[neurons_diet_deg_results2$p_val_adj < 0.05 & abs(neurons_diet_deg_results2$avg_log2FC) > 1, ]
+head(significant_genes_neurons_diet2)
+dim(neurons_diet_deg_results_sorted2)
+dim(significant_genes_neurons_diet2)
+print(significant_genes_neurons_diet2)
+```
+```{r}
+neurons_diet_deg_results2$log2FoldChange <- neurons_diet_deg_results2$avg_log2FC
+neurons_diet_deg_results2$negLog10PValue <- -log10(neurons_diet_deg_results2$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+neurons_diet_deg_results2 <- na.omit(neurons_diet_deg_results2)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(neurons_diet_deg_results2,
+    lab = rownames(neurons_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(neurons_diet_deg_results2,
+    lab = rownames(neurons_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+### Now we are subsetting to ONLY GLIA. repeat the above DEG analysis from the whole cell population with only GLIA with our receptors. this is GLIA only 
+#SUBSET TO ONLY GLIA 
+
+```{r}
+distinct_identity <- unique(filtered_Glp1r_Gfral$identity_layer1)
+print(distinct_identity)
+```
+
+```{r}
+glia <- subset(filtered_Glp1r_Gfral, subset = identity_layer1 == "glial")
+head(glia)
+saveRDS(glia, "filtered_Glp1r_Gfral_glia.rds")
+dim(glia)
+```
+
+##GLIA DEGS glp1r and gfral !!!
+```{r}
+# Identify differentially expressed genes in glia between the two cell types of interest (receptors)
+glia_deg_results <- FindMarkers(glia, ident.1 = "Glp1r", ident.2 = "Gfral", group.by = "cell_type")
+
+# View the results
+## this provides q value by BH
+head(glia_deg_results)
+```
+
+```{r}
+glia_deg_results_sorted <- glia_deg_results[order(glia_deg_results$avg_log2FC), ]
+head(glia_deg_results_sorted)
+significant_genes_glia <- glia_deg_results[glia_deg_results$p_val_adj < 0.05 & abs(glia_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_glia)
+dim(glia_deg_results_sorted)
+dim(significant_genes_glia)
+print(significant_genes_glia)
+```
+
+```{r}
+glia_deg_results$log2FoldChange <- glia_deg_results$avg_log2FC
+glia_deg_results$negLog10PValue <- -log10(glia_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+glia_deg_results <- na.omit(glia_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(glia_deg_results,
+    lab = rownames(glia_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(glia_deg_results,
+    lab = rownames(glia_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+### NOW using glia subset do DEGS for adlib vs fasted 
+```{r}
+# Identify differentially expressed genes between the diet types in GLIA
+
+glia <- AddMetaData(
+  object = glia,
+  metadata = case_when(
+    glia$orig.ident == "adlib" ~ "Ad libitum",
+    glia$orig.ident == "fast" ~ "Fasted",
+    glia$orig.ident == "refed" ~ "Refed",  
+    TRUE ~ "Other"  # Fallback for any other conditions not specifically captured
+  ),
+  col.name = "diet_category"
+)
+
+head(glia)
+# Create a frequency table for the 'diet' column
+glia_diet_counts <- table(glia$diet_category)
+
+# Print the counts
+print(glia_diet_counts)
+```
+
+## glia adlib vs fast 
+```{r}
+glia_diet_deg_results <- FindMarkers(glia, ident.1 = "Ad libitum", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(glia_diet_deg_results)
+```
+
+```{r}
+glia_diet_deg_results_sorted <- glia_diet_deg_results[order(glis_diet_deg_results$avg_log2FC), ]
+head(glia_diet_deg_results_sorted)
+significant_genes_glia_diet <- glia_diet_deg_results[glia_diet_deg_results$p_val_adj < 0.05 & abs(glia_diet_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_glia_diet)
+dim(glia_diet_deg_results_sorted)
+dim(significant_genes_glia_diet)
+print(significant_genes_glia_diet)
+```
+```{r}
+glia_diet_deg_results$log2FoldChange <- glia_diet_deg_results$avg_log2FC
+glia_diet_deg_results$negLog10PValue <- -log10(glia_diet_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+glia_diet_deg_results <- na.omit(glia_diet_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(glia_diet_deg_results,
+    lab = rownames(glia_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(glia_diet_deg_results,
+    lab = rownames(glia_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+####repeat glia degs fed vs fasted 
+
+
+```{r}
+glia_diet_deg_results2 <- FindMarkers(glia, ident.1 = "Refed", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(glia_diet_deg_results2)
+```
+
+```{r}
+glia_diet_deg_results_sorted2 <- glia_diet_deg_results2[order(glis_diet_deg_results2$avg_log2FC), ]
+head(glia_diet_deg_results_sorted2)
+significant_genes_glia_diet2 <- glia_diet_deg_results2[glia_diet_deg_results2$p_val_adj < 0.05 & abs(glia_diet_deg_results2$avg_log2FC) > 1, ]
+head(significant_genes_glia_diet2)
+dim(glia_diet_deg_results_sorted2)
+dim(significant_genes_glia_diet2)
+print(significant_genes_glia_diet2)
+```
+```{r}
+glia_diet_deg_results2$log2FoldChange <- glia_diet_deg_results2$avg_log2FC
+glia_diet_deg_results2$negLog10PValue <- -log10(glia_diet_deg_results2$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+glia_diet_deg_results2 <- na.omit(glia_diet_deg_results2)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(glia_diet_deg_results2,
+    lab = rownames(glia_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(glia_diet_deg_results2,
+    lab = rownames(glia_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
 
 ##these next two chunks separate neurons into glp1r and gfral, but we can also just use the "neurons" object and run the same DEG stuff 
 ##filter neurons to only Glp1r and not gfral  
@@ -547,3 +1306,5 @@ filtered_Gfral_neurons <- neurons[, Gfral_neurons]
 length(Cells(filtered_Gfral_neurons)) 
 saveRDS(filtered_Gfral_neurons, "filtered_Gfral_neurons.rds")
 ```
+
+
