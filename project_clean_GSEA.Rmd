@@ -569,7 +569,7 @@ glp1r_result2 <- glp1r_data2 %>%
 print(glp1r_result2)
 
 #how much of each cluster is id2
-glp1r_result2 <- data2 %>%
+glp1r_result2 <- glp1r_data2 %>%
   group_by(seurat_clusters, identity_layer2) %>%
   summarise(count = n()) %>%
   ungroup() %>%
@@ -884,7 +884,7 @@ head(diet_deg_results3)
 ```{r}
 diet_deg_results_sorted3 <- diet_deg_results3[order(diet_deg_results3$avg_log2FC), ]
 head(diet_deg_results_sorted3)
-significant_genes_diet3 <- diet_deg_results3[diet_deg_results2$p_val_adj < 0.05 & abs(diet_deg_results3$avg_log2FC) > 1, ]
+significant_genes_diet3 <- diet_deg_results3[diet_deg_results3$p_val_adj < 0.05 & abs(diet_deg_results3$avg_log2FC) > 1, ]
 head(significant_genes_diet3)
 dim(diet_deg_results_sorted3)
 dim(significant_genes_diet3)
@@ -1218,7 +1218,7 @@ head(glia_diet_deg_results2)
 ```
 
 ```{r}
-glia_diet_deg_results_sorted2 <- glia_diet_deg_results2[order(glis_diet_deg_results2$avg_log2FC), ]
+glia_diet_deg_results_sorted2 <- glia_diet_deg_results2[order(glia_diet_deg_results2$avg_log2FC), ]
 head(glia_diet_deg_results_sorted2)
 significant_genes_glia_diet2 <- glia_diet_deg_results2[glia_diet_deg_results2$p_val_adj < 0.05 & abs(glia_diet_deg_results2$avg_log2FC) > 1, ]
 head(significant_genes_glia_diet2)
@@ -1271,5 +1271,3 @@ filtered_Gfral_neurons <- neurons[, Gfral_neurons]
 length(Cells(filtered_Gfral_neurons)) 
 saveRDS(filtered_Gfral_neurons, "filtered_Gfral_neurons.rds")
 ```
-
-
