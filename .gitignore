@@ -1,0 +1,4 @@
+*.rds
+data/
+.DS_Store
+*.html
