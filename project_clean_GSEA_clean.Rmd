@@ -1,0 +1,2107 @@
+---
+title: "project_clean"
+output: html_notebook
+---
+
+
+```{r}
+# Load required packges:
+suppressPackageStartupMessages({
+library(dplyr)
+library(Seurat)
+})
+```
+
+```{r}
+# setwd("~/Users/adriana/Documents/Stanford_Classes/First Year/winter 2026/stemrem 205/stemrem")
+setwd("/Users/ryannayebi/Downloads/STANFORD/win25/BMDS205/205_proj")
+```
+
+### rahcel & perla cleaned up this code so that it started with what i want 
+
+```{r}
+metadata.DVC <- read.table("data/metadata_all_DVC.txt", sep = "\t", header = TRUE)
+metadata.DVC <- metadata.DVC[-1,]
+head(metadata.DVC)
+
+allmice.data <- readRDS("data/allmice.rds")
+head(allmice.data)
+```
+
+## GSEA Setup
+
+### Packages and pipeline settings
+```{r gsea-packages-and-settings}
+project_r_libs <- normalizePath("r_libs", mustWork = FALSE)
+.libPaths(c(project_r_libs, .libPaths()))
+
+suppressPackageStartupMessages({
+  library(jsonlite)
+  library(digest)
+  library(fgsea)
+  library(tibble)
+  library(ggplot2)
+})
+
+dir.create("cache", showWarnings = FALSE, recursive = TRUE)
+Sys.setenv(R_USER_CACHE_DIR = normalizePath("cache", mustWork = FALSE))
+
+gsea_pipeline_settings <- list(
+  output_root = "results/gsea",
+  summary_dir = "results/gsea/_summary",
+  ranking_method = "avg_log2FC",
+  de_method_label = "Seurat FindMarkers (per-cell, exploratory)",
+  de_params = list(
+    test.use = "wilcox",
+    slot = "data",
+    fc.slot = "data",
+    pseudocount.use = 1,
+    logfc.threshold = 0.1,
+    min.pct = 0.01,
+    min.diff.pct = -Inf,
+    max.cells.per.ident = Inf,
+    only.pos = FALSE,
+    latent.vars = NULL,
+    min.cells.feature = 3,
+    min.cells.group = 3,
+    densify = FALSE
+  ),
+  fgsea_params = list(
+    minSize = 10,
+    maxSize = 500,
+    seed = 123
+  ),
+  curve_thresholds = list(
+    padj_max = 0.25,
+    abs_nes_min = 1.5
+  ),
+  msigdb = list(
+    db_species = "MM",
+    collection = "MH",
+    species = "Mus musculus"
+  )
+)
+```
+
+### Contrast registry
+```{r gsea-contrast-registry}
+build_contrast_registry <- function() {
+  tibble::tibble(
+    contrast_id = c(
+      "all_glp1r_vs_gfral",
+      "neurons_glp1r_vs_gfral",
+      "all_adlib_vs_fasted",
+      "all_refed_vs_fasted",
+      "all_adlib_vs_refed",
+      "all_neuron_vs_glial",
+      "neurons_adlib_vs_fasted",
+      "neurons_refed_vs_fasted",
+      "glia_glp1r_vs_gfral",
+      "glia_adlib_vs_fasted",
+      "glia_refed_vs_fasted"
+    ),
+    contrast_type = c(
+      "receptor_within_population",
+      "receptor_within_population",
+      "diet_within_population",
+      "diet_within_population",
+      "diet_within_population",
+      "class_vs_class",
+      "diet_within_population",
+      "diet_within_population",
+      "receptor_within_population",
+      "diet_within_population",
+      "diet_within_population"
+    ),
+    object_name = c(
+      "filtered_Glp1r_Gfral",
+      "neurons",
+      "filtered_Glp1r_Gfral",
+      "filtered_Glp1r_Gfral",
+      "filtered_Glp1r_Gfral",
+      "filtered_Glp1r_Gfral",
+      "neurons",
+      "neurons",
+      "glia",
+      "glia",
+      "glia"
+    ),
+    group_by = c(
+      "cell_type",
+      "cell_type",
+      "diet_category",
+      "diet_category",
+      "diet_category",
+      "identity_layer1",
+      "diet_category",
+      "diet_category",
+      "cell_type",
+      "diet_category",
+      "diet_category"
+    ),
+    ident1 = c(
+      "Glp1r",
+      "Glp1r",
+      "Ad libitum",
+      "Refed",
+      "Ad libitum",
+      "neuron",
+      "Ad libitum",
+      "Refed",
+      "Glp1r",
+      "Ad libitum",
+      "Refed"
+    ),
+    ident2 = c(
+      "Gfral",
+      "Gfral",
+      "Fasted",
+      "Fasted",
+      "Refed",
+      "glial",
+      "Fasted",
+      "Fasted",
+      "Gfral",
+      "Fasted",
+      "Fasted"
+    ),
+    notes = c(
+      "Receptor comparison in all receptor-positive cells",
+      "Receptor comparison in neurons only",
+      "Diet comparison in all receptor-positive cells",
+      "Diet comparison in all receptor-positive cells",
+      "Diet comparison in all receptor-positive cells",
+      "Class comparison (neuron vs glial)",
+      "Diet comparison in neurons",
+      "Diet comparison in neurons",
+      "Receptor comparison in glia",
+      "Diet comparison in glia",
+      "Diet comparison in glia"
+    )
+  )
+}
+```
+
+### Object preparation helpers
+```{r gsea-object-helpers}
+derive_cell_type <- function(obj) {
+  receptor_expr <- FetchData(obj, vars = c("Glp1r", "Gfral"))
+  obj$cell_type <- dplyr::case_when(
+    receptor_expr$Glp1r > 0 & receptor_expr$Gfral > 0 ~ "Both",
+    receptor_expr$Glp1r > 0 ~ "Glp1r",
+    receptor_expr$Gfral > 0 ~ "Gfral",
+    TRUE ~ "Neither"
+  )
+  obj
+}
+
+derive_diet_category <- function(obj) {
+  obj$diet_category <- dplyr::case_when(
+    obj$orig.ident == "adlib" ~ "Ad libitum",
+    obj$orig.ident == "fast" ~ "Fasted",
+    obj$orig.ident == "refed" ~ "Refed",
+    TRUE ~ as.character(obj$orig.ident)
+  )
+  obj
+}
+
+prepare_gsea_object <- function(obj) {
+  obj <- derive_cell_type(obj)
+  derive_diet_category(obj)
+}
+
+build_gsea_analysis_objects <- function(filtered_Glp1r_Gfral, neurons) {
+  base_objects <- list(
+    filtered_Glp1r_Gfral = filtered_Glp1r_Gfral,
+    neurons = neurons,
+    glia = subset(filtered_Glp1r_Gfral, subset = identity_layer1 == "glial")
+  )
+
+  lapply(base_objects, prepare_gsea_object)
+}
+
+resolve_analysis_object <- function(analysis_objects, name) {
+  analysis_objects[[name]]
+}
+```
+
+### Cache and DEG helpers
+```{r gsea-cache-and-deg-helpers}
+read_json_if_present <- function(path) {
+  if (file.exists(path)) {
+    jsonlite::fromJSON(path, simplifyVector = FALSE)
+  } else {
+    list(key_hash = NULL)
+  }
+}
+
+write_json_pretty <- function(x, path) {
+  jsonlite::write_json(x, path = path, pretty = TRUE, auto_unbox = TRUE, null = "null")
+}
+
+file_md5_or_na <- function(path) {
+  if (file.exists(path)) {
+    unname(tools::md5sum(path))
+  } else {
+    NA_character_
+  }
+}
+
+validate_group_idents <- function(obj, group_by, ident1, ident2) {
+  group_counts <- table(as.character(obj@meta.data[[group_by]]))
+  list(
+    n_cells_total = length(Cells(obj)),
+    n_cells_ident1 = as.integer(group_counts[ident1]),
+    n_cells_ident2 = as.integer(group_counts[ident2]),
+    group_counts = as.list(group_counts)
+  )
+}
+
+build_de_key <- function(obj, contrast_row, de_params, validation_info, de_method_label) {
+  list(
+    contrast_id = contrast_row$contrast_id,
+    object_name = contrast_row$object_name,
+    group_by = contrast_row$group_by,
+    ident1 = contrast_row$ident1,
+    ident2 = contrast_row$ident2,
+    seurat_version = as.character(packageVersion("Seurat")),
+    assay_used = DefaultAssay(obj),
+    de_params = de_params,
+    n_cells_total = validation_info$n_cells_total,
+    n_cells_ident1 = validation_info$n_cells_ident1,
+    n_cells_ident2 = validation_info$n_cells_ident2,
+    cell_barcode_hash = digest::digest(sort(Cells(obj)), algo = "xxhash64"),
+    group_counts_hash = digest::digest(validation_info$group_counts, algo = "xxhash64"),
+    de_method_label = de_method_label
+  )
+}
+
+compute_or_load_deg <- function(obj, contrast_row, contrast_dir, settings) {
+  dir.create(contrast_dir, showWarnings = FALSE, recursive = TRUE)
+  deg_rds <- file.path(contrast_dir, "deg_results.rds")
+  deg_csv <- file.path(contrast_dir, "deg_results.csv")
+  deg_meta_json <- file.path(contrast_dir, "deg_meta.json")
+
+  validation_info <- validate_group_idents(
+    obj = obj,
+    group_by = contrast_row$group_by,
+    ident1 = contrast_row$ident1,
+    ident2 = contrast_row$ident2
+  )
+
+  de_key <- build_de_key(
+    obj = obj,
+    contrast_row = contrast_row,
+    de_params = settings$de_params,
+    validation_info = validation_info,
+    de_method_label = settings$de_method_label
+  )
+  de_key_hash <- digest::digest(de_key, algo = "xxhash64")
+
+  prior_meta <- read_json_if_present(deg_meta_json)
+  cache_hit <- file.exists(deg_rds) && identical(prior_meta$key_hash, de_key_hash)
+  cache_status <- if (cache_hit) "hit" else if (file.exists(deg_rds)) "mismatch_recompute" else "miss_recompute"
+
+  if (cache_hit) {
+    deg_df <- readRDS(deg_rds)
+  } else {
+    deg_df <- FindMarkers(
+      object = obj,
+      ident.1 = contrast_row$ident1,
+      ident.2 = contrast_row$ident2,
+      group.by = contrast_row$group_by,
+      test.use = settings$de_params$test.use,
+      slot = settings$de_params$slot,
+      fc.slot = settings$de_params$fc.slot,
+      pseudocount.use = settings$de_params$pseudocount.use,
+      logfc.threshold = settings$de_params$logfc.threshold,
+      min.pct = settings$de_params$min.pct,
+      min.diff.pct = settings$de_params$min.diff.pct,
+      max.cells.per.ident = settings$de_params$max.cells.per.ident,
+      only.pos = settings$de_params$only.pos,
+      latent.vars = settings$de_params$latent.vars,
+      min.cells.feature = settings$de_params$min.cells.feature,
+      min.cells.group = settings$de_params$min.cells.group,
+      densify = settings$de_params$densify
+    )
+    saveRDS(deg_df, deg_rds)
+
+    deg_csv_tbl <- tibble::rownames_to_column(as.data.frame(deg_df), var = "gene")
+    write.csv(deg_csv_tbl, deg_csv, row.names = FALSE)
+
+    write_json_pretty(
+      list(
+        generated_at = as.character(Sys.time()),
+        key_hash = de_key_hash,
+        key = de_key,
+        cache_status = cache_status
+      ),
+      deg_meta_json
+    )
+  }
+
+  list(
+    deg_df = deg_df,
+    cache_status = cache_status,
+    key_hash = de_key_hash,
+    validation = validation_info,
+    files = list(
+      deg_rds = deg_rds,
+      deg_csv = deg_csv,
+      deg_meta_json = deg_meta_json
+    )
+  )
+}
+```
+
+### Ranking and fgsea helpers
+```{r gsea-ranking-and-fgsea-helpers}
+build_ranks <- function(deg_df) {
+  ranked_raw <- tibble::rownames_to_column(as.data.frame(deg_df), var = "gene") %>%
+    dplyr::filter(!is.na(gene), gene != "", is.finite(avg_log2FC)) %>%
+    dplyr::mutate(rank_score = avg_log2FC)
+
+  ranked_tbl <- ranked_raw %>%
+    dplyr::arrange(dplyr::desc(abs(rank_score))) %>%
+    dplyr::distinct(gene, .keep_all = TRUE)
+
+  ranks <- ranked_tbl$rank_score
+  names(ranks) <- ranked_tbl$gene
+  ranks <- sort(ranks, decreasing = TRUE)
+
+  list(
+    ranked_tbl = ranked_tbl,
+    ranks = ranks,
+    n_ranked_genes = nrow(ranked_raw),
+    n_unique_ranked_genes = nrow(ranked_tbl)
+  )
+}
+
+find_msigdb_cache_file <- function(cache_root) {
+  cache_dir <- file.path(cache_root, "R", "msigdbr")
+  if (!dir.exists(cache_dir)) {
+    return(NA_character_)
+  }
+
+  candidates <- list.files(cache_dir, pattern = "msigdb.*\\.rds$", full.names = TRUE)
+  if (length(candidates) == 0) {
+    return(NA_character_)
+  }
+
+  candidates[which.max(file.info(candidates)$mtime)]
+}
+
+run_or_load_fgsea <- function(ranks, hallmark_pathways, contrast_row, contrast_dir, settings, msigdb_info) {
+  fgsea_rds <- file.path(contrast_dir, "hallmark_fgsea.rds")
+  fgsea_csv <- file.path(contrast_dir, "hallmark_fgsea.csv")
+  fgsea_meta_json <- file.path(contrast_dir, "fgsea_meta.json")
+
+  fgsea_key <- list(
+    contrast_id = contrast_row$contrast_id,
+    ranking_method = settings$ranking_method,
+    msigdb_db_species = settings$msigdb$db_species,
+    msigdb_collection = settings$msigdb$collection,
+    msigdb_cache_file = msigdb_info$cache_file,
+    msigdb_cache_md5 = msigdb_info$cache_md5,
+    fgsea_params = settings$fgsea_params,
+    rank_vector_hash = digest::digest(ranks, algo="xxhash64")
+  )
+  fgsea_key_hash <- digest::digest(fgsea_key, algo="xxhash64")
+
+  prior_meta <- read_json_if_present(fgsea_meta_json)
+  cache_hit <- file.exists(fgsea_rds) && identical(prior_meta$key_hash, fgsea_key_hash)
+  cache_status <- if (cache_hit) "hit" else if (file.exists(fgsea_rds)) "mismatch_recompute" else "miss_recompute"
+
+  if (cache_hit) {
+    gsea_df <- readRDS(fgsea_rds)
+  } else {
+    set.seed(settings$fgsea_params$seed)
+    gsea_df <- fgsea::fgseaMultilevel(
+      pathways = hallmark_pathways,
+      stats = ranks,
+      minSize = settings$fgsea_params$minSize,
+      maxSize = settings$fgsea_params$maxSize
+    )
+    gsea_df <- as.data.frame(gsea_df) %>%
+      dplyr::arrange(padj, dplyr::desc(abs(NES)))
+
+    saveRDS(gsea_df, fgsea_rds)
+
+    gsea_csv_tbl <- gsea_df %>%
+      dplyr::mutate(
+        leadingEdge = vapply(leadingEdge, paste, collapse = ";", FUN.VALUE = character(1))
+      )
+    write.csv(gsea_csv_tbl, fgsea_csv, row.names=FALSE)
+
+    write_json_pretty(
+      list(
+        generated_at = as.character(Sys.time()),
+        key_hash = fgsea_key_hash,
+        key = fgsea_key,
+        cache_status = cache_status
+      ),
+      fgsea_meta_json
+    )
+  }
+
+  list(
+    gsea_df = gsea_df,
+    cache_status = cache_status,
+    key_hash = fgsea_key_hash,
+    files = list(
+      fgsea_rds = fgsea_rds,
+      fgsea_csv = fgsea_csv,
+      fgsea_meta_json = fgsea_meta_json
+    )
+  )
+}
+
+compute_match_metrics <- function(ranks, hallmark_pathways, gsea_df) {
+  pathway_genes <- unique(unlist(hallmark_pathways))
+  n_ranked <- length(ranks)
+  n_matched <- length(intersect(names(ranks), pathway_genes))
+  match_rate <- n_matched/max(n_ranked, 1)
+
+  list(
+    n_pathways_library = length(hallmark_pathways),
+    n_pathways_tested = nrow(gsea_df),
+    n_genes_matched_to_pathways = n_matched,
+    match_rate = match_rate,
+    low_match_warning = match_rate < 0.5
+  )
+}
+```
+
+### Plotting and manifest helpers
+```{r gsea-plotting-and-manifest-helpers}
+make_summary_plots <- function(gsea_df, contrast_row, contrast_dir) {
+  if (nrow(gsea_df) == 0) {
+    return(list(bar_plot = NA_character_, bubble_plot = NA_character_))
+  }
+
+  plot_tbl <- gsea_df %>%
+    dplyr::filter(is.finite(NES), is.finite(padj)) %>%
+    dplyr::arrange(padj, dplyr::desc(abs(NES)), pathway) %>%
+    dplyr::slice_head(n = 10)
+
+  if (nrow(plot_tbl) == 0) {
+    return(list(bar_plot = NA_character_, bubble_plot = NA_character_))
+  }
+
+  plot_tbl <- plot_tbl %>%
+    dplyr::mutate(
+      pathway = factor(pathway, levels = pathway[order(NES)]),
+      direction = ifelse(NES > 0, paste0("Higher in ", contrast_row$ident1), paste0("Higher in ", contrast_row$ident2)),
+      neg_log10_padj = -log10(pmax(padj, 1e-300))
+    )
+
+  contrast_label <- paste0(contrast_row$contrast_id, ": ", contrast_row$ident1, " vs ", contrast_row$ident2)
+  bar_path <- file.path(contrast_dir, "hallmark_top_nes_bar.png")
+  bubble_path <- file.path(contrast_dir, "hallmark_bubble.png")
+
+  gsea_bar <- ggplot(plot_tbl, aes(x = pathway, y = NES, fill = NES > 0)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_manual(values = c("#3C78D8", "#CC4125"), guide = "none") +
+    labs(
+      title = paste("Hallmark GSEA:", contrast_label),
+      x = NULL,
+      y = "Normalized Enrichment Score (NES)"
+    ) +
+    theme_minimal()
+  ggsave(filename = bar_path, plot = gsea_bar, width = 8, height = 6, dpi = 300)
+
+  gsea_bubble <- ggplot(plot_tbl, aes(x = NES, y = pathway, size = neg_log10_padj, color = direction)) +
+    geom_point(alpha = 0.85) +
+    scale_color_manual(values = stats::setNames(
+      object = c("#3C78D8", "#CC4125"),
+      nm = c(paste0("Higher in ", contrast_row$ident2), paste0("Higher in ", contrast_row$ident1))
+    )) +
+    labs(
+      title = paste0("Hallmark GSEA Summary:\n", contrast_label),
+      subtitle = "Point size = -log10(adjusted p-value)",
+      x = "Normalized Enrichment Score (NES)",
+      y = NULL,
+      color = "Direction",
+      size = "-log10(padj)"
+    ) +
+    theme_minimal()
+  ggsave(filename = bubble_path, plot = gsea_bubble, width = 8.5, height = 6, dpi = 300)
+
+  list(bar_plot = bar_path, bubble_plot = bubble_path)
+}
+
+make_curve_plots_if_signal <- function(gsea_df, ranks, hallmark_pathways, contrast_row, contrast_dir, thresholds) {
+  if (nrow(gsea_df) == 0) {
+    return(list(
+      positive_curve = NA_character_,
+      negative_curve = NA_character_,
+      curves_generated = FALSE,
+      curve_plots_skipped_reason = "No pathways tested",
+      min_padj = Inf,
+      top_abs_nes = 0
+    ))
+  }
+
+  min_padj <- suppressWarnings(min(gsea_df$padj, na.rm = TRUE))
+  if (!is.finite(min_padj)) min_padj <- Inf
+
+  top_abs_nes <- suppressWarnings(max(abs(gsea_df$NES), na.rm = TRUE))
+  if (!is.finite(top_abs_nes)) top_abs_nes <- 0
+
+  gate_pass <- (min_padj < thresholds$padj_max) || (top_abs_nes > thresholds$abs_nes_min)
+  if (!gate_pass) {
+    reason <- paste0(
+      "Gated off: min(padj)=", signif(min_padj, 3),
+      " and top|NES|=", signif(top_abs_nes, 3),
+      " did not pass thresholds."
+    )
+    return(list(
+      positive_curve = NA_character_,
+      negative_curve = NA_character_,
+      curves_generated = FALSE,
+      curve_plots_skipped_reason = reason,
+      min_padj = min_padj,
+      top_abs_nes = top_abs_nes
+    ))
+  }
+
+  positive_path <- NA_character_
+  negative_path <- NA_character_
+
+  top_positive <- gsea_df %>%
+    dplyr::filter(NES > 0) %>%
+    dplyr::slice_min(order_by = padj, n = 1)
+
+  top_negative <- gsea_df %>%
+    dplyr::filter(NES < 0) %>%
+    dplyr::slice_min(order_by = padj, n = 1)
+
+  if (nrow(top_positive) > 0) {
+    positive_name <- top_positive$pathway[[1]]
+    p_positive <- fgsea::plotEnrichment(hallmark_pathways[[positive_name]], ranks) + ggtitle(
+      paste0("Top Positive Trend: ", positive_name),
+      paste0("NES=", round(top_positive$NES[[1]], 2), ", padj=", signif(top_positive$padj[[1]], 3))
+    )
+    positive_path <- file.path(contrast_dir, "top_positive_curve.png")
+    ggsave(filename = positive_path, plot = p_positive, width = 8, height = 5, dpi = 300)
+  }
+
+  if (nrow(top_negative) > 0) {
+    negative_name <- top_negative$pathway[[1]]
+    p_negative <- fgsea::plotEnrichment(hallmark_pathways[[negative_name]], ranks) + ggtitle(
+      paste0("Top Negative Trend: ", negative_name),
+      paste0("NES=", round(top_negative$NES[[1]], 2), ", padj=", signif(top_negative$padj[[1]], 3))
+    )
+    negative_path <- file.path(contrast_dir, "top_negative_curve.png")
+    ggsave(filename = negative_path, plot = p_negative, width = 8, height = 5, dpi = 300)
+  }
+
+  list(
+    positive_curve = positive_path,
+    negative_curve = negative_path,
+    curves_generated = !is.na(positive_path) || !is.na(negative_path),
+    curve_plots_skipped_reason = NA_character_,
+    min_padj = min_padj,
+    top_abs_nes = top_abs_nes
+  )
+}
+
+load_hallmark_pathways <- function(settings) {
+  cache_file <- find_msigdb_cache_file(Sys.getenv("R_USER_CACHE_DIR"))
+  if (is.na(cache_file)) {
+    stop("MSigDB cache file not found in cache/R/msigdbr.")
+  }
+
+  hallmark_tbl <- readRDS(cache_file) %>%
+    dplyr::filter(
+      gs_collection == settings$msigdb$collection,
+      db_target_species == settings$msigdb$db_species
+    ) %>%
+    dplyr::transmute(
+      gs_name = gs_name,
+      gene_symbol = db_gene_symbol
+    ) %>%
+    dplyr::filter(!is.na(gene_symbol), gene_symbol != "") %>%
+    dplyr::distinct()
+
+  pathways <- split(hallmark_tbl$gene_symbol, hallmark_tbl$gs_name)
+
+  list(
+    pathways = pathways,
+    cache_file = cache_file,
+    cache_md5 = file_md5_or_na(cache_file)
+  )
+}
+
+write_contrast_manifest_row <- function(
+  contrast_row, started_at, finished_at,
+  deg_result, rank_result, fgsea_result, match_metrics, curve_result,
+  settings = gsea_pipeline_settings
+) {
+  tibble::tibble(
+    contrast_id = contrast_row$contrast_id,
+    contrast_type = contrast_row$contrast_type,
+    object_name = contrast_row$object_name,
+    group_by = contrast_row$group_by,
+    ident1 = contrast_row$ident1,
+    ident2 = contrast_row$ident2,
+    status = "success",
+    error_message = NA_character_,
+    started_at = as.character(started_at),
+    finished_at = as.character(finished_at),
+    de_cache_status = deg_result$cache_status,
+    fgsea_cache_status = fgsea_result$cache_status,
+    de_key_hash = deg_result$key_hash,
+    fgsea_key_hash = fgsea_result$key_hash,
+    n_cells_total = deg_result$validation$n_cells_total,
+    n_cells_ident1 = deg_result$validation$n_cells_ident1,
+    n_cells_ident2 = deg_result$validation$n_cells_ident2,
+    n_ranked_genes = rank_result$n_ranked_genes,
+    n_unique_ranked_genes = rank_result$n_unique_ranked_genes,
+    n_pathways_library = match_metrics$n_pathways_library,
+    n_pathways_tested = match_metrics$n_pathways_tested,
+    n_genes_matched_to_pathways = match_metrics$n_genes_matched_to_pathways,
+    match_rate = match_metrics$match_rate,
+    low_match_warning = match_metrics$low_match_warning,
+    min_padj = curve_result$min_padj,
+    top_abs_nes = curve_result$top_abs_nes,
+    curves_generated = curve_result$curves_generated,
+    curve_plots_skipped_reason = curve_result$curve_plots_skipped_reason,
+    ranking_method = settings$ranking_method,
+    de_method_label = settings$de_method_label
+  )
+}
+
+collect_top_pathways <- function(gsea_df, contrast_row) {
+  gsea_df %>%
+    dplyr::arrange(padj, dplyr::desc(abs(NES))) %>%
+    dplyr::slice_head(n = 10) %>%
+    dplyr::mutate(
+      contrast_id = contrast_row$contrast_id,
+      contrast_type = contrast_row$contrast_type,
+      ident1 = contrast_row$ident1,
+      ident2 = contrast_row$ident2,
+      rank_within_contrast = dplyr::row_number(),
+      direction = ifelse(NES > 0, contrast_row$ident1, contrast_row$ident2)
+    ) %>%
+    dplyr::select(
+      contrast_id, contrast_type, ident1, ident2, rank_within_contrast,
+      pathway, NES, padj, size, direction
+    )
+}
+```
+
+##START HERE FOR PROJECT
+
+##rachel helped looking for low quality: mt 
+## the chunk below works to reload after deleted allmice.data from environemnt 
+```{r}
+# library(Seurat)
+# allmice.data <- readRDS("/Users/adriana/Documents/Stanford Classes/First Year/winter 2026/stemrem 205/stemrem1/stemrem/allmice.rds")
+# head(allmice.data)
+# metadata <- read.csv('metadata.DVC.csv')
+# head(metadata)
+```
+
+```{r}
+allmice.data[["percent.mt"]] <- PercentageFeatureSet(allmice.data, pattern = "^MT-")
+table(allmice.data$percent.mt)
+```
+
+
+```{r}
+allmice.data[["percent.mt"]] <- PercentageFeatureSet(allmice.data, pattern = "^(mt-|MT-)")
+table(allmice.data$percent.mt)
+```
+
+#very few genes to mt 
+```{r}
+VlnPlot(allmice.data, features = c( "percent.mt"), ncol = 1)
+```
+
+
+```{r}
+features <- rownames(allmice.data)
+head(features)
+```
+
+
+#looking to make sure these exist 
+```{r}
+gene_names <- c("Glp1r", "Gfral")
+present_genes <- gene_names[gene_names %in% rownames(allmice.data)]
+print(present_genes)
+```
+
+```{r}
+gene_expression <- FetchData(allmice.data, vars = c("Glp1r", "Gfral"))
+head(gene_expression)
+```
+
+##i made an rds file with all the mouse stuff and sorted for glp1r and gfral. but i did not sort mitochondria or features so may need to redo!!! (its we checked mitchondria and it seems like the authors already sorted that )
+##this output is GLP1 and GRFAL positive CELLS (not neurons, so any cells with at least one glp1r or gfral)
+#defining threshold as greater than 0
+```{r}
+threshold <- 0
+# Identify cells where at least one of the genes exceeds the threshold
+cells_to_keep <- rownames(gene_expression)[gene_expression$Glp1r > threshold | gene_expression$Gfral > threshold]
+filtered_Glp1r_Gfral <- allmice.data[, cells_to_keep]
+length(Cells(filtered_Glp1r_Gfral)) 
+saveRDS(filtered_Glp1r_Gfral, "filtered_Glp1r_Gfral.rds")
+```
+
+##filter to only Glp1r and not gfral, this output is only glp1 
+```{r}
+threshold <- 0
+# Identify cells where at least one of the genes exceeds the threshold (| = or)
+Glp1r_cells_to_keep <- rownames(gene_expression)[gene_expression$Glp1r > threshold & gene_expression$Gfral == 0]
+filtered_Glp1r <- allmice.data[, Glp1r_cells_to_keep]
+length(Cells(filtered_Glp1r)) 
+saveRDS(filtered_Glp1r, "filtered_Glp1r.rds")
+```
+
+##filter to only gfral, this output is only gfral
+```{r}
+threshold <- 0
+# Identify cells where at least one of the genes exceeds the threshold (Gfral only)
+Gfral_cells_to_keep <- rownames(gene_expression)[gene_expression$Glp1r == 0 & gene_expression$Gfral > threshold]
+filtered_Gfral <- allmice.data[, Gfral_cells_to_keep]
+length(Cells(filtered_Gfral)) 
+saveRDS(filtered_Gfral, "filtered_Gfral.rds")
+```
+
+```{r}
+library(dplyr)
+```
+
+#normal set with both and each separate
+```{r}
+# normalize
+filtered_Glp1r_Gfral <- NormalizeData(filtered_Glp1r_Gfral)
+filtered_Gfral <- NormalizeData(filtered_Gfral)
+filtered_Glp1r <- NormalizeData(filtered_Glp1r)
+```
+
+#look for variable genes in combined with both glp1 and gfral 
+```{r}
+# identify variable genes in the group (this is not separating them)
+#genes with the most variance in the dataset 
+filtered_Glp1r_Gfral <- FindVariableFeatures(filtered_Glp1r_Gfral)
+```
+```{r}
+receptor_expression <- FetchData(filtered_Glp1r_Gfral, vars = c("Glp1r", "Gfral"))
+head(receptor_expression)
+```
+
+#variable genes in separate
+```{r}
+##identify variable genes between these 
+filtered_Glp1r <- FindVariableFeatures(filtered_Glp1r)
+filtered_Gfral <- FindVariableFeatures(filtered_Gfral)
+```
+
+# top 10 for each separated 
+```{r}
+# view top 10
+top10_Glp1r <- head(VariableFeatures(filtered_Glp1r), 10)
+top10_Gfral <- head(VariableFeatures(filtered_Gfral), 10)
+top10_Glp1r
+top10_Gfral
+```
+
+#plot each separately
+
+```{r}
+# plot variablility distribution
+plot1 <- VariableFeaturePlot(filtered_Glp1r)
+plot_Glp1r <- LabelPoints(plot = plot1, points = top10_Glp1r, repel = TRUE)
+plot2 <- VariableFeaturePlot(filtered_Gfral)
+plot_Gfral <- LabelPoints(plot = plot2, points = top10_Gfral, repel = TRUE) 
+plot_Glp1r
+plot_Gfral
+```
+
+
+```{r}
+# Z-score scale (genes)
+Glp1r.Gfral.genes <- rownames(filtered_Glp1r_Gfral)
+Glp1r.genes <- rownames(filtered_Glp1r)
+filtered_Glp1r <- ScaleData(filtered_Glp1r, features = Glp1r.genes)
+Gfral.genes <- rownames(filtered_Gfral)
+filtered_Gfral <- ScaleData(filtered_Gfral, features = Gfral.genes)
+filtered_Glp1r_Gfral <- ScaleData(filtered_Glp1r_Gfral, features = Glp1r.Gfral.genes)
+```
+
+```{r}
+head(filtered_Glp1r@assays$originalexp$counts)
+head(filtered_Glp1r@meta.data)
+head(filtered_Gfral@assays$originalexp$counts)
+head(filtered_Gfral@meta.data)
+```
+
+# PCA, default subsets to highly variable features
+#output shows positive and negative genes
+```{r}
+filtered_Glp1r <- RunPCA(filtered_Glp1r)
+filtered_Gfral <- RunPCA(filtered_Gfral)
+filtered_Glp1r_Gfral <- RunPCA(filtered_Glp1r_Gfral)
+```
+
+###how do i spread out the cells more so they arent all on top of each other like this? 
+fixed I think right @adriana?
+```{r}
+# A visualization that is useful for determining how many PCs to include
+# pick a dot for number of PCAs
+ElbowPlot(filtered_Glp1r)
+ElbowPlot(filtered_Gfral)
+ElbowPlot(filtered_Glp1r_Gfral)
+```
+
+# computing the neighborhood graph and find clusters for each receptor type and also all my cells 
+#higher resolution is more clusters
+##starting with 10 
+```{r}
+filtered_Glp1r <- FindNeighbors(filtered_Glp1r, dims = 1:5)
+filtered_Glp1r <- FindClusters(filtered_Glp1r, resolution = 0.15)
+filtered_Gfral <- FindNeighbors(filtered_Gfral, dims = 1:4)
+filtered_Gfral <- FindClusters(filtered_Gfral, resolution = 0.15)
+filtered_Glp1r_Gfral <- FindNeighbors(filtered_Glp1r_Gfral, dims = 1:6)
+filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral, resolution = 0.15)
+```
+
+#UMAP of Glp1r alone, Gfral alone, and combined subset
+```{r}
+filtered_Glp1r <- RunUMAP(filtered_Glp1r, dims = 1:6)
+filtered_Gfral <- RunUMAP(filtered_Gfral, dims = 1:6)
+filtered_Glp1r_Gfral <- RunUMAP(filtered_Glp1r_Gfral, dims = 1:6)
+```
+
+# plot UMAP
+```{r}
+DimPlot(filtered_Glp1r, reduction = "umap")
+DimPlot(filtered_Gfral, reduction = "umap")
+DimPlot(filtered_Glp1r_Gfral, reduction = "umap")
+```
+
+
+## trying to annotate clusters
+```{r}
+cluster_membership <- filtered_Glp1r_Gfral$seurat_clusters
+table(cluster_membership)
+```
+
+### we use findallmarkers and find DIFFERENCES between clusters
+##FindAllMarkersidentifies markers for all clusters in a Seurat object relative to all other clusters, differential expression analysis across all clusters 
+##output is a data frame that includes a row for each gene, annotated by the cluster where it is significantly expressed
+```{r}
+cluster_markers <- FindAllMarkers(filtered_Glp1r_Gfral)
+# View top markers for each cluster
+# head(cluster_markers)
+```
+
+bookmark
+##significant cluster markers
+```{r}
+significant_markers <- cluster_markers %>%
+  filter(p_val_adj < 0.05 & abs(avg_log2FC) > 1) 
+head(significant_markers)
+dim(significant_markers)
+```
+```{r}
+library(dplyr)
+
+# Assuming your data is named 'markers' and has 'gene' and 'cluster' columns
+genes_by_cluster <- significant_markers %>%
+  group_by(cluster) %>%
+  summarize(genes = list(gene))  # Create a list of genes for each cluster
+
+# View the result
+print(genes_by_cluster)
+```
+
+### look at top different genes by cluster
+```{r}
+
+#cluster0
+sorted_cluster0_genes <- significant_markers %>%
+  filter(cluster == "0") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+
+# View the genes for cluster0
+print(sorted_cluster0_genes)
+
+#cluster 1
+sorted_cluster1_genes <- significant_markers %>%
+  filter(cluster == "1") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster1_genes)
+
+#cluster 2
+sorted_cluster2_genes <- significant_markers %>%
+  filter(cluster == "2") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+
+print(sorted_cluster2_genes)
+
+#cluster3
+sorted_cluster3_genes <- significant_markers %>%
+  filter(cluster == "3") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster3_genes)
+
+#cluster4
+sorted_cluster4_genes <- significant_markers %>%
+  filter(cluster == "4") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster4_genes)
+
+#cluster5
+sorted_cluster5_genes <- significant_markers %>%
+  filter(cluster == "5") %>%
+  arrange(desc(avg_log2FC)) %>%
+  select(gene, avg_log2FC)
+
+print(sorted_cluster5_genes)
+
+```
+
+###I want to look at top genes for every cluster, trying to identify identity overlap !!!
+##trying to figure out top genes for each cluster, not just the different ones
+##after running the code again now it only has 8 clusters 0-7. finding clusters again probably caused the issue! (need to use elbow plot to guide, if these clusters all look the same w top cells, try lower elbow plot #)
+# 0.15 res has 6 clusters seeing if this helps
+#0.17 had 7 clusters
+
+```{r}
+library(Seurat)
+library(dplyr)
+
+# Ensure clustering has been performed on your data
+#filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral)
+
+# Get the average expression per cluster
+average_expression <- AverageExpression(filtered_Glp1r_Gfral, return.seurat = FALSE)
+
+# Convert the average expression to a data frame
+avg_expr_df <- as.data.frame(average_expression$originalexp)
+
+# Create an empty list to hold top genes for each cluster
+top_genes_list <- list()
+
+# Specify the number of top genes to retrieve
+top_n <- 10
+
+# Loop through each column (cluster) to find top genes
+for (cluster in colnames(avg_expr_df)) {
+  # Get the top N genes for the cluster
+  top_genes <- avg_expr_df %>%
+    arrange(desc(!!sym(cluster))) %>%  # Sort the genes by their average expression
+    head(top_n) %>%                    # Select the top N genes
+    rownames()                         # Extract gene names
+  top_genes_list[[cluster]] <- top_genes  # Store results in the list
+}
+
+# Combine the results into a data frame for easier viewing
+top_genes_df <- do.call(rbind, lapply(names(top_genes_list), function(cluster_name) {
+  data.frame(Cluster = cluster_name, Gene = top_genes_list[[cluster_name]], stringsAsFactors = FALSE)
+}))
+
+# View the results
+print(top_genes_df)
+```
+
+## separating each column is one cluster !!!
+## this gives us gene is row and expr for each cluster
+```{r}
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(tibble)  # For rownames_to_column()
+
+# Ensure clustering has been performed on your data
+#filtered_Glp1r_Gfral <- FindClusters(filtered_Glp1r_Gfral) ## DO NOT REPEAT THIS KEEP MY DIMS
+
+# Get the average expression per cluster
+average_expression <- AverageExpression(filtered_Glp1r_Gfral, return.seurat = FALSE)
+
+# Convert the average expression to a data frame
+avg_expr_df <- as.data.frame(average_expression$originalexp)
+
+# Check the dim and structure of the average expression data frame
+print(dim(avg_expr_df))  # Expect genes x clusters
+print(head(avg_expr_df))  # Preview the first few rows
+
+# Create an empty list to hold top genes for each cluster
+top_genes_list <- list()
+
+# Specify the number of top genes to retrieve
+top_n <- 10
+
+# Loop through each column (cluster) to find top genes along with their expression levels
+for (cluster in colnames(avg_expr_df)) {
+  # Get the top N genes for the cluster
+  top_genes <- avg_expr_df %>%
+    arrange(desc(!!sym(cluster))) %>%     # Sort the genes by their average expression
+    head(top_n) %>%                       # Select the top N genes
+    rownames_to_column(var = "Gene") %>%  # Convert row names to a column called "Gene"
+    mutate(Cluster = cluster,              # Add a column for the cluster
+           Expression = !!sym(cluster))    # Capture the corresponding expression value
+  
+  # Store results in the list
+  top_genes_list[[cluster]] <- top_genes  
+}
+
+# Combine the results into a single data frame
+top_genes_df <- bind_rows(top_genes_list)
+
+# Pivot the data frame to have genes as rows and clusters as columns
+top_genes_wide <- top_genes_df %>%
+  select(Gene, Cluster, Expression) %>%  # Ensure the relevant columns are selected
+  pivot_wider(names_from = Cluster, values_from = Expression, values_fill = 0)  # Convert to wide format
+
+# View the reshaped data frame
+print(top_genes_wide)
+```
+
+##this orders by a specified cluster 
+```{r}
+#ordered by 0
+ordered_genes_cluster0 <- top_genes_wide %>%
+  arrange(desc(g0))  
+print(ordered_genes_cluster0)
+
+#ordered by cluster 1
+ordered_genes_cluster1 <- top_genes_wide %>%
+  arrange(desc(g1))  
+print(ordered_genes_cluster1)
+
+#ordered by cluster 2
+ordered_genes_cluster2 <- top_genes_wide %>%
+  arrange(desc(g2))  
+print(ordered_genes_cluster2)
+
+#ordered by cluster 3
+ordered_genes_cluster3 <- top_genes_wide %>%
+  arrange(desc(g3))  
+print(ordered_genes_cluster3)
+
+#ordered by cluster 4
+ordered_genes_cluster4 <- top_genes_wide %>%
+  arrange(desc(g4))  
+print(ordered_genes_cluster4)
+
+#ordered by cluster 5
+ordered_genes_cluster5 <- top_genes_wide %>%
+  arrange(desc(g5))  
+print(ordered_genes_cluster5)
+
+```
+
+
+##trying to see which "identity_layer1" most common in cluster
+
+```{r}
+data <- filtered_Glp1r_Gfral@meta.data %>%
+  select(seurat_clusters, identity_layer1)  
+
+# Find the most frequent identity per cluster
+result <- data %>%
+  group_by(seurat_clusters) %>%
+  summarise(most_frequent_identity1 = names(which.max(table(identity_layer1))))
+
+# View the result
+print(result)
+```
+
+
+##trying identity_layer2 - NO REPEATS WITH 0.15 res, so we like 0.15 res better than 0.2 , 6 total clusters and label by identity layer 2, but astrocytes get messed up. trying other res . 0.17 has repeats so stick with 0.15!
+```{r}
+data2 <- filtered_Glp1r_Gfral@meta.data %>%
+  select(seurat_clusters, identity_layer2)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+result2 <- data2 %>%
+  group_by(seurat_clusters) %>%
+  summarise(most_frequent_identity2 = names(which.max(table(identity_layer2))))
+
+# View the result
+print(result2)
+
+#how much of each cluster is id2
+result2 <- data2 %>%
+  group_by(seurat_clusters, identity_layer2) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer2, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(result2)
+```
+
+
+##trying identity_layer3
+```{r}
+data3 <- filtered_Glp1r_Gfral@meta.data %>%
+  select(seurat_clusters, identity_layer3)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+result3 <- data3 %>%
+  group_by(seurat_clusters) %>%
+  summarise(most_frequent_identity3 = names(which.max(table(identity_layer3))))
+
+##how much of each cluster has this identity3
+result3 <- data3 %>%
+  group_by(seurat_clusters, identity_layer3) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer3, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(result3)
+```
+
+## i like it better with 0.15 res ! keeping this
+##rename clusters by identity_layer3
+
+```{r}
+# 0 = mixed_neurons (because it has a lot of 1. 2 and 3) (layer 3 but more specific than layer 2 i think)
+# 1 = Sall3_class (layer 2, more accurate, 70%)
+# 2 = M0 (M0 good, 98%)
+# 3 = Vglut1 (good, 85%)
+# 4 = astrocyte (this is mixed but lets keep it?? figure out bio relevance- golli neurons express glia genes!!!)
+# 5 = oligodendrocyte (98%)
+# 6 = 
+
+new.cluster.ids <- c("mixed_neurons", 'Sall3_class', "M0", 
+                     'Vglut1', 'astrocyte',
+                     'oligodendrocyte'
+                     )
+names(new.cluster.ids) <- levels(filtered_Glp1r_Gfral)
+filtered_Glp1r_Gfral <- RenameIdents(filtered_Glp1r_Gfral, new.cluster.ids)
+```
+
+```{r}
+# plot umap with renamed clusters
+DimPlot(filtered_Glp1r_Gfral, reduction = "umap", label = TRUE, pt.size = 0.3)
+```
+
+### Looking for cluster identities for filtered_glp1r
+##trying to see which "identity_layer1" most common in cluster
+
+```{r}
+glp1r_data <- filtered_Glp1r@meta.data %>%
+  select(seurat_clusters, identity_layer1)  
+
+# Find the most frequent identity per cluster
+glp1r_result <- glp1r_data %>%
+  group_by(seurat_clusters) %>%
+  summarise(glp1r_most_frequent_identity1 = names(which.max(table(identity_layer1))))
+
+# View the result
+print(glp1r_result)
+```
+
+
+##trying identity_layer2 - NO REPEATS WITH 0.15 res, so we like 0.15 res better than 0.2 , 6 total clusters and label by identity layer 2, but astrocytes get messed up. trying other res . 0.17 has repeats so stick with 0.15!
+```{r}
+glp1r_data2 <- filtered_Glp1r@meta.data %>%
+  select(seurat_clusters, identity_layer2)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+glp1r_result2 <- glp1r_data2 %>%
+  group_by(seurat_clusters) %>%
+  summarise(glp1r_most_frequent_identity2 = names(which.max(table(identity_layer2))))
+
+# View the result
+print(glp1r_result2)
+
+#how much of each cluster is id2
+glp1r_result2 <- glp1r_data2 %>%
+  group_by(seurat_clusters, identity_layer2) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer2, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(glp1r_result2)
+```
+
+
+##trying identity_layer3
+```{r}
+glp1r_data3 <- filtered_Glp1r@meta.data %>%
+  select(seurat_clusters, identity_layer3)  # Make sure 'identity' is the correct name for the identity column
+
+# Find the most frequent identity per cluster
+glp1r_result3 <- glp1r_data3 %>%
+  group_by(seurat_clusters) %>%
+  summarise(glp1r_most_frequent_identity3 = names(which.max(table(identity_layer3))))
+print(glp1r_result3)
+
+##how much of each cluster has this identity3
+glp1r_result3 <- glp1r_data3 %>%
+  group_by(seurat_clusters, identity_layer3) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(seurat_clusters) %>%
+  mutate(proportion = count / sum(count)) %>%
+  select(seurat_clusters, identity_layer3, proportion) %>%
+  arrange(seurat_clusters, desc(proportion))
+
+# View the result
+print(glp1r_result3)
+```
+
+##looking at interesting genes on all of the umaps
+```{r}
+genes_to_plot = c( 'Glp1r', 'Gfral',  'Vglut' )
+FeaturePlot(filtered_Glp1r, reduction = "umap", features = genes_to_plot)
+FeaturePlot(filtered_Gfral, reduction = "umap", features = genes_to_plot)
+FeaturePlot(filtered_Glp1r_Gfral, reduction = "umap", features = genes_to_plot)
+```
+
+##NOW MOVING ON TO DEGS
+
+## compare DEGs between glp1r and gfral cells using the combined dataset 
+
+#identifying cells to pick
+```{r}
+glp1r_cells <- WhichCells(filtered_Glp1r_Gfral, expression = Glp1r > 0)  # Adjust the threshold based on your needs
+gfral_cells <- WhichCells(filtered_Glp1r_Gfral, expression = Gfral > 0) 
+```
+
+#this makes a column called cell_type and labels cells as both, glp1r, or gfral so we can compare only glp1r and gfral
+##FindMarkers compares our two groups and the output is DEGs between the two groups
+```{r}
+filtered_Glp1r_Gfral <- AddMetaData(filtered_Glp1r_Gfral, 
+                                     metadata = ifelse(Cells(filtered_Glp1r_Gfral) %in% glp1r_cells & 
+                                                       Cells(filtered_Glp1r_Gfral) %in% gfral_cells, 
+                                                       "Both", 
+                                                       ifelse(Cells(filtered_Glp1r_Gfral) %in% glp1r_cells, 
+                                                              "Glp1r", 
+                                                              "Gfral")), 
+                                     col.name = "cell_type")
+
+# Identify differentially expressed genes between the two cell types of interest, this selected the cells we want and not BOTH
+deg_results <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Glp1r", ident.2 = "Gfral", group.by = "cell_type")
+
+# View the results
+## this provides q value by BH
+head(deg_results)
+```
+
+#sort the degs 
+```{r}
+deg_results_sorted <- deg_results[order(deg_results$avg_log2FC), ]
+head(deg_results_sorted)
+significant_genes <- deg_results[deg_results$p_val_adj < 0.05 & abs(deg_results$avg_log2FC) > 1, ]
+head(significant_genes)
+dim(deg_results_sorted)
+dim(significant_genes)
+print(significant_genes)
+```
+
+```{r}
+# Create a new data frame for plotting
+library(ggplot2)
+
+# Add a column for -log10(p_val_adj) for plotting
+deg_results$log2FoldChange <- deg_results$avg_log2FC
+deg_results$negLog10PValue <- -log10(deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+deg_results <- na.omit(deg_results)
+```
+
+##volcano with enhanced volcano
+```{r}
+BiocManager::install("EnhancedVolcano", force = TRUE)
+library(EnhancedVolcano)
+```
+
+##this is showing us DEGs, first plot shows glp1r and gfral then we narrow it down to see the other genes 
+```{r}
+# Create the volcano plot
+EnhancedVolcano(deg_results,
+    lab = rownames(deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(deg_results,
+    lab = rownames(deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+### Now we are subsetting to ONLY neurons. repeat the above DEG analysis from the whole cell population with only neurons with our receptors. this is neruons only 
+#this subsets to only neurons 
+```{r}
+neurons <- subset(filtered_Glp1r_Gfral, subset = identity_layer1 == "neuron")
+head(neurons)
+saveRDS(neurons, "filtered_Glp1r_Gfral_neurons.rds")
+```
+
+##looking at degs between glp1r and gfral neurons only 
+
+```{r}
+# Identify differentially expressed genes between the two cell types of interest 
+neuron_deg_results <- FindMarkers(neurons, ident.1 = "Glp1r", ident.2 = "Gfral", group.by = "cell_type")
+
+# View the results
+## this provides q value by BH
+head(neuron_deg_results)
+```
+
+```{r}
+neuron_deg_results_sorted <- neuron_deg_results[order(neuron_deg_results$avg_log2FC), ]
+head(neuron_deg_results_sorted)
+significant_genes_neuron <- neuron_deg_results[neuron_deg_results$p_val_adj < 0.05 & abs(neuron_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_neuron)
+dim(neuron_deg_results_sorted)
+dim(significant_genes_neuron)
+print(significant_genes_neuron)
+```
+```{r}
+neuron_deg_results$log2FoldChange <- neuron_deg_results$avg_log2FC
+neuron_deg_results$negLog10PValue <- -log10(neuron_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+neuron_deg_results <- na.omit(neuron_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(neuron_deg_results,
+    lab = rownames(neuron_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(neuron_deg_results,
+    lab = rownames(neuron_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+## Registry Driven GSEA Pipeline
+All pairwise FindMarkers contrasts
+### Registry inputs
+```{r gsea-registry-inputs}
+row_to_list <- function(row_tbl) {
+  list(
+    contrast_id = row_tbl$contrast_id[[1]],
+    contrast_type = row_tbl$contrast_type[[1]],
+    object_name = row_tbl$object_name[[1]],
+    group_by = row_tbl$group_by[[1]],
+    ident1 = row_tbl$ident1[[1]],
+    ident2 = row_tbl$ident2[[1]],
+    notes = row_tbl$notes[[1]]
+  )
+}
+
+dir.create(gsea_pipeline_settings$output_root, showWarnings = FALSE, recursive = TRUE)
+dir.create(gsea_pipeline_settings$summary_dir, showWarnings = FALSE, recursive = TRUE)
+
+gsea_analysis_objects <- build_gsea_analysis_objects(
+  filtered_Glp1r_Gfral = filtered_Glp1r_Gfral,
+  neurons = neurons
+)
+
+hallmark_info <- load_hallmark_pathways(gsea_pipeline_settings)
+contrast_registry <- build_contrast_registry()
+```
+
+### One-contrast runner
+```{r gsea-single-contrast-runner}
+run_single_gsea_contrast <- function(contrast_row, analysis_objects, hallmark_info, settings) {
+  contrast_dir <- file.path(settings$output_root, contrast_row$contrast_id)
+  dir.create(contrast_dir, showWarnings = FALSE, recursive = TRUE)
+
+  started_at <- Sys.time()
+  obj <- resolve_analysis_object(analysis_objects, contrast_row$object_name)
+
+  deg_result <- compute_or_load_deg(
+    obj = obj,
+    contrast_row = contrast_row,
+    contrast_dir = contrast_dir,
+    settings = settings
+  )
+
+  rank_result <- build_ranks(deg_result$deg_df)
+  write.csv(
+    rank_result$ranked_tbl,
+    file.path(contrast_dir, "ranked_genes.csv"),
+    row.names = FALSE
+  )
+
+  fgsea_result <- run_or_load_fgsea(
+    ranks = rank_result$ranks,
+    hallmark_pathways = hallmark_info$pathways,
+    contrast_row = contrast_row,
+    contrast_dir = contrast_dir,
+    settings = settings,
+    msigdb_info = hallmark_info
+  )
+
+  match_metrics <- compute_match_metrics(
+    ranks = rank_result$ranks,
+    hallmark_pathways = hallmark_info$pathways,
+    gsea_df = fgsea_result$gsea_df
+  )
+
+  if (isTRUE(match_metrics$low_match_warning)) {
+    warning(
+      paste0(
+        "Low pathway match rate for ", contrast_row$contrast_id,
+        ": ", signif(match_metrics$match_rate, 3)
+      )
+    )
+  }
+
+  make_summary_plots(
+    gsea_df = fgsea_result$gsea_df,
+    contrast_row = contrast_row,
+    contrast_dir = contrast_dir
+  )
+
+  curve_result <- make_curve_plots_if_signal(
+    gsea_df = fgsea_result$gsea_df,
+    ranks = rank_result$ranks,
+    hallmark_pathways = hallmark_info$pathways,
+    contrast_row = contrast_row,
+    contrast_dir = contrast_dir,
+    thresholds = settings$curve_thresholds
+  )
+
+  finished_at <- Sys.time()
+
+  list(
+    manifest_row = write_contrast_manifest_row(
+      contrast_row = contrast_row,
+      started_at = started_at,
+      finished_at = finished_at,
+      deg_result = deg_result,
+      rank_result = rank_result,
+      fgsea_result = fgsea_result,
+      match_metrics = match_metrics,
+      curve_result = curve_result,
+      settings = settings
+    ),
+    top_pathways = collect_top_pathways(fgsea_result$gsea_df, contrast_row)
+  )
+}
+```
+
+### Run all contrasts
+```{r gsea-run-all-contrasts}
+contrast_results <- lapply(seq_len(nrow(contrast_registry)), function(i) {
+  contrast_row <- row_to_list(contrast_registry[i, ])
+  run_single_gsea_contrast(
+    contrast_row = contrast_row,
+    analysis_objects = gsea_analysis_objects,
+    hallmark_info = hallmark_info,
+    settings = gsea_pipeline_settings
+  )
+})
+
+manifest_rows <- lapply(contrast_results, function(result) result$manifest_row)
+top_pathway_rows <- lapply(contrast_results, function(result) result$top_pathways)
+```
+
+### Write summary tables
+```{r gsea-write-summary-tables}
+run_manifest <- dplyr::bind_rows(manifest_rows) %>%
+  dplyr::arrange(contrast_type, contrast_id)
+write.csv(
+  run_manifest,
+  file.path(gsea_pipeline_settings$summary_dir, "run_manifest.csv"),
+  row.names = FALSE
+)
+
+top_pathways_by_contrast <- dplyr::bind_rows(top_pathway_rows) %>%
+  dplyr::arrange(contrast_type, contrast_id, rank_within_contrast)
+write.csv(
+  top_pathways_by_contrast,
+  file.path(gsea_pipeline_settings$summary_dir, "top_pathways_by_contrast.csv"),
+  row.names = FALSE
+)
+
+top_pathways_by_group <- top_pathways_by_contrast %>%
+  dplyr::group_by(contrast_type, pathway) %>%
+  dplyr::summarise(
+    n_contrasts = dplyr::n_distinct(contrast_id),
+    contrasts = paste(sort(unique(contrast_id)), collapse = ";"),
+    best_padj = min(padj, na.rm = TRUE),
+    median_padj = median(padj, na.rm = TRUE),
+    mean_NES = mean(NES, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(contrast_type, best_padj, dplyr::desc(n_contrasts), dplyr::desc(abs(mean_NES)))
+write.csv(
+  top_pathways_by_group,
+  file.path(gsea_pipeline_settings$summary_dir, "top_pathways_by_group.csv"),
+  row.names = FALSE
+)
+```
+
+### Manifest preview
+```{r gsea-manifest-preview}
+run_manifest %>%
+  dplyr::select(
+    contrast_id, status, de_cache_status, fgsea_cache_status,
+    n_ranked_genes, n_pathways_tested, match_rate,
+    curves_generated, curve_plots_skipped_reason
+  )
+```
+
+
+### now looking between adlib vs fasted (can do this with any feeding condition) from our all cells. we may want to do this with neurons and glia separately 
+
+###DEGS for ad libitum vs fast in our subset !!! 
+## i think this pattern can be used for like neurons and stuff too. NEED to read paper to see what is already done! but i think this way of subsetting is unique 
+```{r}
+distinct_values <- unique(filtered_Glp1r_Gfral$orig.ident)
+print(distinct_values)
+```
+
+
+#creating a new column with the name diet_category like we did with cell_type (THIS IS NOT SPECIFIC TO NEURONS!)
+```{r}
+filtered_Glp1r_Gfral <- AddMetaData(
+  object = filtered_Glp1r_Gfral,
+  metadata = case_when(
+    filtered_Glp1r_Gfral$orig.ident == "adlib" ~ "Ad libitum",
+    filtered_Glp1r_Gfral$orig.ident == "fast" ~ "Fasted",
+    filtered_Glp1r_Gfral$orig.ident == "refed" ~ "Refed",  
+    TRUE ~ "Other"  # Fallback for any other conditions not specifically captured
+  ),
+  col.name = "diet_category"
+)
+
+head(filtered_Glp1r_Gfral)
+# Create a frequency table for the 'diet' column
+diet_counts <- table(filtered_Glp1r_Gfral$diet_category)
+
+# Print the counts
+print(diet_counts)
+```
+
+```{r}
+# Identify differentially expressed genes between the diet types
+diet_deg_results <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Ad libitum", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(diet_deg_results)
+```
+
+```{r}
+head(diet_deg_results)
+```
+
+```{r}
+diet_deg_results_sorted <- diet_deg_results[order(diet_deg_results$avg_log2FC), ]
+head(diet_deg_results_sorted)
+significant_genes_diet <- diet_deg_results[diet_deg_results$p_val_adj < 0.05 & abs(diet_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_diet)
+dim(diet_deg_results_sorted)
+dim(significant_genes_diet)
+print(significant_genes_diet)
+```
+```{r}
+diet_deg_results$log2FoldChange <- diet_deg_results$avg_log2FC
+diet_deg_results$negLog10PValue <- -log10(diet_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+diet_deg_results <- na.omit(diet_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(diet_deg_results,
+    lab = rownames(diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(diet_deg_results,
+    lab = rownames(diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+### diet refed vs fast in all glp1r&gfral
+
+```{r}
+# Identify differentially expressed genes between the diet types
+diet_deg_results2 <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Refed", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(diet_deg_results2)
+```
+
+```{r}
+diet_deg_results_sorted2 <- diet_deg_results2[order(diet_deg_results2$avg_log2FC), ]
+head(diet_deg_results_sorted2)
+significant_genes_diet2 <- diet_deg_results2[diet_deg_results2$p_val_adj < 0.05 & abs(diet_deg_results2$avg_log2FC) > 1, ]
+head(significant_genes_diet2)
+dim(diet_deg_results_sorted2)
+dim(significant_genes_diet2)
+print(significant_genes_diet2)
+```
+```{r}
+diet_deg_results2$log2FoldChange <- diet_deg_results2$avg_log2FC
+diet_deg_results2$negLog10PValue <- -log10(diet_deg_results2$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+diet_deg_results2 <- na.omit(diet_deg_results2)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(diet_deg_results2,
+    lab = rownames(diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(diet_deg_results2,
+    lab = rownames(diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+## all glp1r and gfral DIET adlib vs refed (bc refed vs fast doesnt seem to have much difference)
+
+```{r}
+# Identify differentially expressed genes between the diet types
+diet_deg_results3 <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "Ad libitum", ident.2 = "Refed", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(diet_deg_results3)
+```
+
+```{r}
+diet_deg_results_sorted3 <- diet_deg_results3[order(diet_deg_results3$avg_log2FC), ]
+head(diet_deg_results_sorted3)
+significant_genes_diet3 <- diet_deg_results3[diet_deg_results3$p_val_adj < 0.05 & abs(diet_deg_results3$avg_log2FC) > 1, ]
+head(significant_genes_diet3)
+dim(diet_deg_results_sorted3)
+dim(significant_genes_diet3)
+print(significant_genes_diet3)
+```
+```{r}
+diet_deg_results3$log2FoldChange <- diet_deg_results3$avg_log2FC
+diet_deg_results3$negLog10PValue <- -log10(diet_deg_results3$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+diet_deg_results3 <- na.omit(diet_deg_results3)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(diet_deg_results3,
+    lab = rownames(diet_deg_results3),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(diet_deg_results3,
+    lab = rownames(diet_deg_results3),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+
+##trying to label glp1r and gfral in volcano plot for fed vs fasted, they are there but not significant 
+
+```{r}
+# Define the genes you want to check
+genes_to_check <- c("Glp1r", "Gfral")
+
+# Check if these genes are in the row names of the deg_results
+gene_presence <- genes_to_check %in% rownames(diet_deg_results)
+
+# Show which genes are present
+print(data.frame(Gene = genes_to_check, Present = gene_presence))
+presence_results <- data.frame(Gene = genes_to_check, Present = gene_presence)
+print(presence_results)
+# Get the rows corresponding to the present genes
+present_genes_info <- diet_deg_results[rownames(diet_deg_results) %in% genes_to_check, ]
+
+# Print the information for the present genes
+print(present_genes_info)
+```
+
+##now looking at DEGs bw neurons and glia in my population
+##neurons vs glia identity1 first using both combined 
+```{r}
+# Perform differential expression analysis comparing neurons and glia
+deg_neuron_vs_glia <- FindMarkers(filtered_Glp1r_Gfral, ident.1 = "neuron", ident.2 = "glial", group.by = "identity_layer1")
+
+# View the results
+head(deg_neuron_vs_glia)
+```
+```{r}
+deg_neuron_vs_glia$log2FoldChange <- deg_neuron_vs_glia$avg_log2FC
+deg_neuron_vs_glia$negLog10PValue <- -log10(deg_neuron_vs_glia$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+deg_neuron_vs_glia <- na.omit(deg_neuron_vs_glia)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(deg_neuron_vs_glia,
+    lab = rownames(deg_neuron_vs_glia),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(deg_neuron_vs_glia,
+    lab = rownames(deg_neuron_vs_glia),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+
+##adlib vs fasted in NEURONS only 
+
+```{r}
+# Identify differentially expressed genes between the diet types in NEURONS
+
+neurons <- AddMetaData(
+  object = neurons,
+  metadata = case_when(
+    neurons$orig.ident == "adlib" ~ "Ad libitum",
+    neurons$orig.ident == "fast" ~ "Fasted",
+    neurons$orig.ident == "refed" ~ "Refed",  
+    TRUE ~ "Other"  # Fallback for any other conditions not specifically captured
+  ),
+  col.name = "diet_category"
+)
+
+head(neurons)
+# Create a frequency table for the 'diet' column
+neurons_diet_counts <- table(neurons$diet_category)
+
+# Print the counts
+print(neurons_diet_counts)
+```
+
+## neurons adlib vs fast 
+```{r}
+neurons_diet_deg_results <- FindMarkers(neurons, ident.1 = "Ad libitum", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(neurons_diet_deg_results)
+```
+
+```{r}
+neurons_diet_deg_results_sorted <- neurons_diet_deg_results[order(neurons_diet_deg_results$avg_log2FC), ]
+head(neurons_diet_deg_results_sorted)
+significant_genes_neurons_diet <- neurons_diet_deg_results[neurons_diet_deg_results$p_val_adj < 0.05 & abs(neurons_diet_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_neurons_diet)
+dim(neurons_diet_deg_results_sorted)
+dim(significant_genes_neurons_diet)
+print(significant_genes_neurons_diet)
+```
+```{r}
+neurons_diet_deg_results$log2FoldChange <- neurons_diet_deg_results$avg_log2FC
+neurons_diet_deg_results$negLog10PValue <- -log10(neurons_diet_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+neurons_diet_deg_results <- na.omit(neurons_diet_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(neurons_diet_deg_results,
+    lab = rownames(neurons_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(neurons_diet_deg_results,
+    lab = rownames(neurons_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+### REPEATING WITH FED VS FAST !!!
+## neurons refed vs fast this is going to be referred to as diet "2"
+```{r}
+neurons_diet_deg_results2 <- FindMarkers(neurons, ident.1 = "Refed", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(neurons_diet_deg_results2)
+```
+
+```{r}
+neurons_diet_deg_results_sorted2 <- neurons_diet_deg_results2[order(neurons_diet_deg_results2$avg_log2FC), ]
+head(neurons_diet_deg_results_sorted2)
+significant_genes_neurons_diet2 <- neurons_diet_deg_results2[neurons_diet_deg_results2$p_val_adj < 0.05 & abs(neurons_diet_deg_results2$avg_log2FC) > 1, ]
+head(significant_genes_neurons_diet2)
+dim(neurons_diet_deg_results_sorted2)
+dim(significant_genes_neurons_diet2)
+print(significant_genes_neurons_diet2)
+```
+```{r}
+neurons_diet_deg_results2$log2FoldChange <- neurons_diet_deg_results2$avg_log2FC
+neurons_diet_deg_results2$negLog10PValue <- -log10(neurons_diet_deg_results2$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+neurons_diet_deg_results2 <- na.omit(neurons_diet_deg_results2)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(neurons_diet_deg_results2,
+    lab = rownames(neurons_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(neurons_diet_deg_results2,
+    lab = rownames(neurons_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+### Now we are subsetting to ONLY GLIA. repeat the above DEG analysis from the whole cell population with only GLIA with our receptors. this is GLIA only 
+#SUBSET TO ONLY GLIA 
+
+```{r}
+distinct_identity <- unique(filtered_Glp1r_Gfral$identity_layer1)
+print(distinct_identity)
+```
+
+```{r}
+glia <- subset(filtered_Glp1r_Gfral, subset = identity_layer1 == "glial")
+head(glia)
+saveRDS(glia, "filtered_Glp1r_Gfral_glia.rds")
+dim(glia)
+```
+
+##GLIA DEGS glp1r and gfral !!!
+```{r}
+# Identify differentially expressed genes in glia between the two cell types of interest (receptors)
+glia_deg_results <- FindMarkers(glia, ident.1 = "Glp1r", ident.2 = "Gfral", group.by = "cell_type")
+
+# View the results
+## this provides q value by BH
+head(glia_deg_results)
+```
+
+```{r}
+glia_deg_results_sorted <- glia_deg_results[order(glia_deg_results$avg_log2FC), ]
+head(glia_deg_results_sorted)
+significant_genes_glia <- glia_deg_results[glia_deg_results$p_val_adj < 0.05 & abs(glia_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_glia)
+dim(glia_deg_results_sorted)
+dim(significant_genes_glia)
+print(significant_genes_glia)
+```
+
+```{r}
+glia_deg_results$log2FoldChange <- glia_deg_results$avg_log2FC
+glia_deg_results$negLog10PValue <- -log10(glia_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+glia_deg_results <- na.omit(glia_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(glia_deg_results,
+    lab = rownames(glia_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(glia_deg_results,
+    lab = rownames(glia_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+### NOW using glia subset do DEGS for adlib vs fasted 
+```{r}
+# Identify differentially expressed genes between the diet types in GLIA
+
+glia <- AddMetaData(
+  object = glia,
+  metadata = case_when(
+    glia$orig.ident == "adlib" ~ "Ad libitum",
+    glia$orig.ident == "fast" ~ "Fasted",
+    glia$orig.ident == "refed" ~ "Refed",  
+    TRUE ~ "Other"  # Fallback for any other conditions not specifically captured
+  ),
+  col.name = "diet_category"
+)
+
+head(glia)
+# Create a frequency table for the 'diet' column
+glia_diet_counts <- table(glia$diet_category)
+
+# Print the counts
+print(glia_diet_counts)
+```
+
+## glia adlib vs fast 
+```{r}
+glia_diet_deg_results <- FindMarkers(glia, ident.1 = "Ad libitum", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(glia_diet_deg_results)
+```
+
+```{r}
+glia_diet_deg_results_sorted <- glia_diet_deg_results[order(glia_diet_deg_results$avg_log2FC), ]
+head(glia_diet_deg_results_sorted)
+significant_genes_glia_diet <- glia_diet_deg_results[glia_diet_deg_results$p_val_adj < 0.05 & abs(glia_diet_deg_results$avg_log2FC) > 1, ]
+head(significant_genes_glia_diet)
+dim(glia_diet_deg_results_sorted)
+dim(significant_genes_glia_diet)
+print(significant_genes_glia_diet)
+```
+```{r}
+glia_diet_deg_results$log2FoldChange <- glia_diet_deg_results$avg_log2FC
+glia_diet_deg_results$negLog10PValue <- -log10(glia_diet_deg_results$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+glia_diet_deg_results <- na.omit(glia_diet_deg_results)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(glia_diet_deg_results,
+    lab = rownames(glia_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(glia_diet_deg_results,
+    lab = rownames(glia_diet_deg_results),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+####repeat glia degs fed vs fasted 
+
+
+```{r}
+glia_diet_deg_results2 <- FindMarkers(glia, ident.1 = "Refed", ident.2 = "Fasted", group.by = "diet_category")
+
+# View the results
+## this provides q value by BH
+head(glia_diet_deg_results2)
+```
+
+```{r}
+glia_diet_deg_results_sorted2 <- glia_diet_deg_results2[order(glia_diet_deg_results2$avg_log2FC), ]
+head(glia_diet_deg_results_sorted2)
+significant_genes_glia_diet2 <- glia_diet_deg_results2[glia_diet_deg_results2$p_val_adj < 0.05 & abs(glia_diet_deg_results2$avg_log2FC) > 1, ]
+head(significant_genes_glia_diet2)
+dim(glia_diet_deg_results_sorted2)
+dim(significant_genes_glia_diet2)
+print(significant_genes_glia_diet2)
+```
+```{r}
+glia_diet_deg_results2$log2FoldChange <- glia_diet_deg_results2$avg_log2FC
+glia_diet_deg_results2$negLog10PValue <- -log10(glia_diet_deg_results2$p_val_adj)
+
+# Remove NA values if any (they can cause plotting issues)
+glia_diet_deg_results2 <- na.omit(glia_diet_deg_results2)
+```
+
+```{r}
+# Create the volcano plot
+EnhancedVolcano(glia_diet_deg_results2,
+    lab = rownames(glia_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05, )
+
+EnhancedVolcano(glia_diet_deg_results2,
+    lab = rownames(glia_diet_deg_results2),
+    x = 'log2FoldChange',
+    y = 'p_val_adj',                        
+    pCutoff = 0.05,
+    xlim = c(-5, 5),                          
+    ylim = c(0, 10), )
+```
+
+##these next two chunks separate neurons into glp1r and gfral, but we can also just use the "neurons" object and run the same DEG stuff 
+##filter neurons to only Glp1r and not gfral  
+```{r}
+threshold <- 0
+# Identify cells where at least one of the genes exceeds the threshold (| = or)
+Glp1r_neurons <- rownames(gene_expression)[gene_expression$Glp1r > threshold & gene_expression$Gfral == 0]
+filtered_Glp1r_neurons <- neurons[, Glp1r_neurons]
+length(Cells(filtered_Glp1r_neurons)) 
+saveRDS(filtered_Glp1r_neurons, "filtered_Glp1r_neurons.rds")
+```
+
+##filter neurons to only gfral and not glp1r
+```{r}
+threshold <- 0
+# Identify cells where at least one of the genes exceeds the threshold (Gfral only)
+Gfral_neurons <- rownames(gene_expression)[gene_expression$Glp1r == 0 & gene_expression$Gfral > threshold]
+filtered_Gfral_neurons <- neurons[, Gfral_neurons]
+length(Cells(filtered_Gfral_neurons)) 
+saveRDS(filtered_Gfral_neurons, "filtered_Gfral_neurons.rds")
+```
