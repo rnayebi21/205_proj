@@ -1,0 +1,11 @@
+anndata
+scanpy
+pyreadr
+upsetplot
+seaborn
+matplotlib
+pandas
+numpy
+scipy
+scikit-learn
+xgboost
